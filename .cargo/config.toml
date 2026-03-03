@@ -1,0 +1,12 @@
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tsrc/linker.ld",
+]
+# Standard runner: launch QEMU with 1GB RAM and hardware virtualization enabled.
+runner = "qemu-system-aarch64 -machine virt,virtualization=on -cpu cortex-a57 -m 1G -nographic -kernel"
+
+# Debug runner (uncomment to use): Add -s -S to pause at boot and wait for GDB on port 1234.
+# runner = "qemu-system-aarch64 -machine virt,virtualization=on -cpu cortex-a57 -m 1G -nographic -s -S -kernel"

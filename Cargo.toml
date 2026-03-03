@@ -1,0 +1,19 @@
+[package]
+name = "T1_Hypervisor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[bin]]
+name = "T1_Hypervisor"
+test = false
+
+# Production release profile for the hypervisor binary.
+# These settings are essential for a bare-metal no_std environment.
+[profile.release]
+lto = true           # Link-Time Optimization: reduces binary size, enables cross-crate inlining
+opt-level = 3        # Maximum optimization level
+codegen-units = 1    # Single codegen unit for more aggressive LTO
+panic = "abort"      # No unwinding on panic (no_std requirement, removes stack unwinding machinery)
+strip = "debuginfo"  # Strip debug symbols from release binary
