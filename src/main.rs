@@ -1,28 +1,47 @@
 #![no_main]
 #![no_std]
 
+use core::fmt::Write;
 use core::panic::PanicInfo;
+
+mod uart;
+use uart::UART;
 
 // Pull in the assembly routine where execution starts.
 core::arch::global_asm!(include_str!("boot.s"));
 
 /// The main entry point for the hypervisor, called from assembly `boot.s`.
+///
+/// `dtb_ptr` is the physical address of the Device Tree Blob, passed in `x0`
+/// by the bootloader (QEMU or U-Boot) per the ARM64 Linux Boot Protocol.
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain(_dtb_ptr: usize) -> ! {
-    // I will initialize the UART here next to print something.
+pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
+    // Initialize the UART so we can print debug output.
+    UART.init();
 
-    // Infinite loop to keep the hypervisor running (for now, doing nothing).
+    // Print a banner to confirm the hypervisor booted successfully.
+    writeln!(&mut &UART, "\r\n==========================================").ok();
+    writeln!(&mut &UART, "  T1 Hypervisor - ARMv8-A / EL2          ").ok();
+    writeln!(&mut &UART, "==========================================").ok();
+    writeln!(&mut &UART, "[boot] UART initialized.").ok();
+    writeln!(&mut &UART, "[boot] DTB located at: {:#010x}", dtb_ptr).ok();
+    writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
+
+    // Infinite low-power idle loop.
+    // Future phases will replace this with the hypervisor's main event loop.
     loop {
-        // WFE (Wait For Event) puts the CPU into a low-power state until an event or interrupt occurs.
         unsafe { core::arch::asm!("wfe") };
     }
 }
 
-/// This function is called on panic.
+/// Panic handler: print the panic location over UART and halt.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    // We attempt to print even if UART was not yet initialized.
+    // In the worst case the output is garbled, but it is still more useful
+    // than a silent hang.
+    writeln!(&mut &UART, "\n[PANIC] {}", info).ok();
     loop {
-        // On panic, just halt. Later I will print the panic message to UART.
         unsafe { core::arch::asm!("wfe") };
     }
 }
