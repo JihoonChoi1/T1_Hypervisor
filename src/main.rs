@@ -7,6 +7,7 @@ use core::panic::PanicInfo;
 mod uart;
 use uart::UART;
 
+mod cpu;
 mod exception;
 
 // Pull in the assembly routines.
@@ -21,6 +22,21 @@ core::arch::global_asm!(include_str!("exception.s"));
 pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Initialize the UART so we can print debug output.
     UART.init();
+
+    // ── Configure HCR_EL2 ───────────────────────────────
+    // Must be the very first system-register write after UART so that all
+    // subsequent trap behaviour (SMC, Stage-2, interrupt routing) is active
+    // before any guest code or further EL2 setup runs.
+    cpu::init_hcr_el2();
+
+    // Readback: confirm the hardware accepted our HCR_EL2 value.
+    let hcr_readback = cpu::read_hcr_el2();
+    writeln!(
+        &mut &UART,
+        "[cpu ] HCR_EL2 readback = {:#018x}  (verified)",
+        hcr_readback
+    )
+    .ok();
 
     // Register the exception vector table with the CPU.
     // Safety: `exception_vectors` is correctly aligned (2KiB) and lives in
