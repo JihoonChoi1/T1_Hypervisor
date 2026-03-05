@@ -7,6 +7,8 @@ use core::panic::PanicInfo;
 mod uart;
 use uart::UART;
 
+mod exception;
+
 // Pull in the assembly routines.
 core::arch::global_asm!(include_str!("boot.s"));
 core::arch::global_asm!(include_str!("exception.s"));

@@ -27,6 +27,101 @@
 //   Offset 0x780:                          — SError/vSError
 // ============================================================================
 
+// ============================================================================
+// ExceptionFrame layout (matches the Rust ExceptionFrame struct in exception.rs)
+//
+// When an exception fires we push all general-purpose caller/callee registers
+// plus the three EL2 exception system registers onto the stack so that the
+// Rust handler can inspect them.
+//
+// Stack layout after SAVE_CONTEXT (lowest address = top of stack):
+//   [sp +   0] x0
+//   [sp +   8] x1
+//   ...
+//   [sp + 232] x29  (frame pointer)
+//   [sp + 240] x30  (link register / return address before exception)
+//   [sp + 248] sp_el0   (saved via mrs)
+//   [sp + 256] elr_el2  (exception return address)
+//   [sp + 264] spsr_el2 (saved program status)
+//   Total frame size: 272 bytes  (0x110)
+// ============================================================================
+
+// ── SAVE_CONTEXT macro ────────────────────────────────────────────────────────
+// Pushes all 31 GPRs plus ELR/SPSR/SP_EL0 onto the current (EL2) stack.
+// After this macro the stack pointer (x0) is the first argument to the
+// Rust handler (pointer to ExceptionFrame).
+.macro SAVE_CONTEXT
+    // Allocate 272 bytes on the stack (must remain 16-byte aligned).
+    sub     sp,  sp,  #272
+
+    // Store x0–x29 (GPRs).  stp stores a pair with signed offset.
+    stp     x0,  x1,  [sp, #0]
+    stp     x2,  x3,  [sp, #16]
+    stp     x4,  x5,  [sp, #32]
+    stp     x6,  x7,  [sp, #48]
+    stp     x8,  x9,  [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+
+    // Store x30 (LR) and SP_EL0.
+    mrs     x0,  sp_el0
+    stp     x30, x0,  [sp, #240]
+
+    // Store ELR_EL2 (exception return address) and SPSR_EL2 (saved pstate).
+    mrs     x0,  elr_el2
+    mrs     x1,  spsr_el2
+    stp     x0,  x1,  [sp, #256]
+
+    // Pass pointer to the frame as the first argument (x0) to the Rust handler.
+    mov     x0,  sp
+.endm
+
+// ── RESTORE_CONTEXT macro ─────────────────────────────────────────────────────
+// Restores ELR/SPSR/SP_EL0 and all GPRs, then frees the stack frame.
+// Must be called before ERET.
+.macro RESTORE_CONTEXT
+    // Reload ELR_EL2 and SPSR_EL2.
+    ldp     x0,  x1,  [sp, #256]
+    msr     elr_el2,  x0
+    msr     spsr_el2, x1
+
+    // Reload x30 and SP_EL0.
+    ldp     x30, x0,  [sp, #240]
+    msr     sp_el0, x0
+
+    // Reload x0–x29.
+    ldp     x28, x29, [sp, #224]
+    ldp     x26, x27, [sp, #208]
+    ldp     x24, x25, [sp, #192]
+    ldp     x22, x23, [sp, #176]
+    ldp     x20, x21, [sp, #160]
+    ldp     x18, x19, [sp, #144]
+    ldp     x16, x17, [sp, #128]
+    ldp     x14, x15, [sp, #112]
+    ldp     x12, x13, [sp, #96]
+    ldp     x10, x11, [sp, #80]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x0,  x1,  [sp, #0]
+
+    // Free the stack frame.
+    add     sp,  sp,  #272
+.endm
+
+// ============================================================================
+// Vector table
+// ============================================================================
+
 .section .text.exception_vectors, "ax", @progbits
 .global exception_vectors
 
@@ -56,11 +151,16 @@ curr_el_sp0_serr:
 
 // ── Group 2: Current EL, SP_ELx ─────────────────────────────────────────────
 // These fire while EL2 is using its own stack pointer (normal operation).
-// This is what fires for hypervisor bugs (null-deref, bad instruction…).
+// A synchronous exception here almost certainly means a hypervisor bug.
 
-.balign 0x80        // entry 4: Synchronous
+.balign 0x80        // entry 4: Synchronous  ← EL2 hypervisor fault (bug)
 curr_el_spx_sync:
-    b   unhandled_exception
+    SAVE_CONTEXT
+    bl      el2_sync_handler       // call Rust: fn el2_sync_handler(frame: &ExceptionFrame)
+    // el2_sync_handler is noreturn for fatal faults, but keep RESTORE for
+    // future recoverable cases.
+    RESTORE_CONTEXT
+    eret
 
 .balign 0x80        // entry 5: IRQ
 curr_el_spx_irq:
@@ -70,14 +170,18 @@ curr_el_spx_irq:
 curr_el_spx_fiq:
     b   unhandled_exception
 
-.balign 0x80        // entry 7: SError
+.balign 0x80        // entry 7: SError  ← hardware / memory bus error
 curr_el_spx_serr:
-    b   unhandled_exception
+    SAVE_CONTEXT
+    bl      el2_serror_handler     // call Rust: fn el2_serror_handler(frame: &ExceptionFrame)
+    RESTORE_CONTEXT
+    eret
 
 // ── Group 3: Lower EL, AArch64 ──────────────────────────────────────────────
 // These fire when a 64-bit guest (running at EL1/EL0) takes an exception
-// that is routed up to EL2.  This is the *primary* group we will extend in
-// Step 2 and Step 3 (HVC calls, Stage-2 page faults, guest IRQs…).
+// that is routed up to EL2.  This is the *primary* group for Phase 4+
+// (HVC calls, Stage-2 page faults, guest IRQs…).
+// For now every entry falls through to the unhandled path.
 
 .balign 0x80        // entry 8: Synchronous  ← guest sync traps / HVC
 lower_el_aarch64_sync:
@@ -97,7 +201,7 @@ lower_el_aarch64_serr:
 
 // ── Group 4: Lower EL, AArch32 ──────────────────────────────────────────────
 // These fire when a 32-bit guest takes an exception routed to EL2.
-// This do not support 32-bit guests — treat as fatal.
+// I do not support 32-bit guests — treat as fatal.
 
 .balign 0x80        // entry 12: Synchronous
 lower_el_aarch32_sync:
