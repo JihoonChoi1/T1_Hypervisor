@@ -132,10 +132,10 @@ impl fmt::Write for &Uart {
 /// The global early-boot UART instance.
 ///
 /// `UART` is used only before memory management and proper synchronization
-/// primitives are set up. After SMP is enabled (Phase 6), it must be replaced
+/// primitives are set up. After SMP is enabled, it must be replaced
 /// with a properly synchronized driver.
 ///
 /// # Safety
-/// Access to `UART` is safe during single-core boot (Phase 1~3) because only
+/// Access to `UART` is safe during single-core boot because only
 /// CPU 0 runs at this point. SMP phases must add mutual exclusion.
 pub static UART: Uart = unsafe { Uart::new(PL011_BASE) };

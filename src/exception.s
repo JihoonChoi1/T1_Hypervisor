@@ -179,7 +179,7 @@ curr_el_spx_serr:
 
 // ── Group 3: Lower EL, AArch64 ──────────────────────────────────────────────
 // These fire when a 64-bit guest (running at EL1/EL0) takes an exception
-// that is routed up to EL2.  This is the *primary* group for Phase 4+
+// that is routed up to EL2.  This is the *primary* group for hypervisor workloads.
 // (HVC calls, Stage-2 page faults, guest IRQs…).
 // For now every entry falls through to the unhandled path.
 

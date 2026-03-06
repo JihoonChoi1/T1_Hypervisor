@@ -41,8 +41,7 @@ SECTIONS
         __boot_stack_top = .;
     }
 
-    /* Mark the end of the kernel image.
-     * Phase 2 PMM uses this to find the first free physical page. */
+    /* The Physical Memory Manager uses this to find the first free physical page. */
     __kernel_end = .;
 
     /* Discard debugging and build info sections to keep binary clean */

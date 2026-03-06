@@ -26,7 +26,7 @@ const HCR_VM: u64 = 1 << 0;
 
 /// Bit 3 — FMO: Route physical FIQ interrupts to EL2, not EL1.
 /// The GIC will route physical FIQs to EL2; after the virtual GIC (vGIC)
-/// is wired in Phase 5 we forward them as vFIQs to the guest.
+/// is wired we forward them as vFIQs to the guest.
 ///
 /// HFT NOTE: This blanket-routes ALL FIQs to EL2, including those on
 /// HFT-dedicated cores.  Interim setting — the permanent fix is GIC SPI

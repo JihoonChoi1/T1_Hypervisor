@@ -9,6 +9,7 @@ use uart::UART;
 
 mod cpu;
 mod exception;
+mod memory;
 
 // Pull in the assembly routines.
 core::arch::global_asm!(include_str!("boot.s"));
@@ -60,6 +61,44 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
         &mut &UART,
         "[cpu ] SCTLR_EL2 readback = {:#018x}  (verified)",
         cpu::read_sctlr_el2()
+    )
+    .ok();
+
+    // ── Memory Layout Report ───────────────────────────────────────────────
+    // Print every memory layout constant over UART so that developers can
+    // visually confirm the layout before the Buddy Allocator and MMU are
+    // built on top of these constants.  No runtime computation — all values
+    // are compile-time constants; this block is pure diagnostics.
+    writeln!(&mut &UART, "\r\n[mem ] Physical memory layout:").ok();
+    writeln!(
+        &mut &UART,
+        "[mem ]   RAM           {:#010x} - {:#010x}  ({} MiB)",
+        memory::RAM_START,
+        memory::RAM_END,
+        memory::RAM_SIZE / (1024 * 1024),
+    )
+    .ok();
+    writeln!(
+        &mut &UART,
+        "[mem ]   UART MMIO     {:#010x} - {:#010x}  (Device-nGnRnE, 4 KiB)",
+        memory::UART_MMIO_BASE,
+        memory::UART_MMIO_END,
+    )
+    .ok();
+    writeln!(
+        &mut &UART,
+        "[mem ]   PMM pool      {:#010x} - {:#010x}  ({} MiB, free for Buddy Alloc)",
+        memory::RAM_START,
+        memory::PMM_END,
+        (memory::PMM_END - memory::RAM_START) / (1024 * 1024),
+    )
+    .ok();
+    writeln!(
+        &mut &UART,
+        "[mem ]   HFT reserved  {:#010x} - {:#010x}  ({} MiB, pinned 2 MiB huge pages)",
+        memory::HFT_RESERVED_BASE,
+        memory::HFT_RESERVED_END,
+        memory::HFT_RESERVED_SIZE / (1024 * 1024),
     )
     .ok();
 
