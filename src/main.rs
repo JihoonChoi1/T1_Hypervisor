@@ -38,6 +38,31 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     )
     .ok();
 
+    // ── Configure CPTR_EL2 ─────────────────────────────────────────
+    // Open FP/SIMD instructions to EL2 and EL1.  Without this, any floating-
+    // point or NEON instruction executed in EL1 (e.g. Linux early boot memset)
+    // triggers an Undefined Instruction trap to EL2, crashing the guest before
+    // it prints a single character.
+    cpu::init_cptr_el2();
+    writeln!(
+        &mut &UART,
+        "[cpu ] CPTR_EL2 readback = {:#018x}  (verified)",
+        cpu::read_cptr_el2()
+    )
+    .ok();
+
+    // ── Configure SCTLR_EL2 ────────────────────────────────────────
+    // Write a deterministic pre-MMU baseline: SA=1 (stack alignment check
+    // active), MMU=0, caches=0, little-endian.  The MMU bit will be flipped
+    // by memory::stage1::enable_mmu() (TODO).
+    cpu::init_sctlr_el2();
+    writeln!(
+        &mut &UART,
+        "[cpu ] SCTLR_EL2 readback = {:#018x}  (verified)",
+        cpu::read_sctlr_el2()
+    )
+    .ok();
+
     // Register the exception vector table with the CPU.
     // Safety: `exception_vectors` is correctly aligned (2KiB) and lives in
     // read-only executable memory for the lifetime of the hypervisor.
