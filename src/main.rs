@@ -102,6 +102,45 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     )
     .ok();
 
+    // ── Buddy Allocator initialisation ────────────────────────────────────────
+    // The linker script guarantees that __kernel_end is 4 KiB-aligned.
+    // We hand everything from __kernel_end to PMM_END to the Buddy Allocator,
+    // then immediately carve the HFT reserved region out of the free pool.
+    unsafe extern "C" {
+        // Defined in src/linker.ld; address is the first byte past the kernel.
+        static __kernel_end: u8;
+    }
+    let pool_start = unsafe { &__kernel_end as *const u8 as usize };
+
+    // SAFETY: single-core boot; pool_start is page-aligned per linker script.
+    unsafe { memory::pmm::init(pool_start) };
+
+    // Remove the HFT slab from the general free pool before any other
+    // allocation happens.  After this call the trading engine owns it.
+    unsafe { memory::pmm::prewarm_hft_region() };
+
+    // Print per-order free block inventory for verification.
+    writeln!(&mut &UART, "\r\n[pmm ] Buddy Allocator initialised:").ok();
+    let total_free = unsafe { memory::pmm::free_pages() };
+    writeln!(&mut &UART, "[pmm ]   pool_start    = {pool_start:#010x}").ok();
+    writeln!(
+        &mut &UART,
+        "[pmm ]   free pages    = {total_free} ({} MiB)",
+        total_free * memory::pmm::PAGE_SIZE / (1024 * 1024),
+    )
+    .ok();
+    for order in 0..memory::pmm::MAX_ORDER {
+        let blocks = unsafe { memory::pmm::free_blocks_at_order(order) };
+        if blocks > 0 {
+            writeln!(
+                &mut &UART,
+                "[pmm ]   order {order:>2}  ({:>6} KiB)  →  {blocks} block(s)",
+                (memory::pmm::PAGE_SIZE << order) / 1024,
+            )
+            .ok();
+        }
+    }
+
     // Register the exception vector table with the CPU.
     // Safety: `exception_vectors` is correctly aligned (2KiB) and lives in
     // read-only executable memory for the lifetime of the hypervisor.

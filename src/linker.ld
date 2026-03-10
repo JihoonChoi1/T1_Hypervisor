@@ -41,7 +41,15 @@ SECTIONS
         __boot_stack_top = .;
     }
 
-    /* The Physical Memory Manager uses this to find the first free physical page. */
+    /* Round up to the next 4 KiB page boundary before marking the end of the
+     * kernel image.  Without this guard the PMM's first "free" page could
+     * overlap the last partial page of BSS or the boot stack, silently
+     * corrupting existing kernel data the moment the allocator hands it out.
+     *
+     * ALIGN(4096) is cheap — it wastes at most 4095 bytes of address space —
+     * and makes every address returned by BuddyAllocator::alloc() safe to use
+     * as a page frame without any masking or rounding on the Rust side. */
+    . = ALIGN(4096);
     __kernel_end = .;
 
     /* Discard debugging and build info sections to keep binary clean */

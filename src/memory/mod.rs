@@ -18,6 +18,8 @@
 //   4. stage1.rs uses these ranges for MMU page tables.
 // ============================================================================
 
+pub mod pmm;
+
 // ── Physical RAM ─────────────────────────────────────────────────────────────
 //
 // QEMU virt: the primary RAM bank starts at GPA 0x4000_0000.
