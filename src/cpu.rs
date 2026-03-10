@@ -8,9 +8,10 @@
 //
 // Call order (from kmain):
 //   1. cpu::init_hcr_el2()    — declare virtualisation mode & trap policy
-//   2. cpu::init_cptr_el2()   — open FP/SIMD to EL2 and EL1 guests   [NEXT]
-//   3. cpu::init_sctlr_el2()  — CPU control defaults before MMU on    [NEXT]
-//   MMU activation belongs to memory::stage1                        [NEXT]
+//   2. cpu::init_cptr_el2()   — open FP/SIMD to EL2 and EL1 guests
+//   3. cpu::init_sctlr_el2()  — CPU control defaults before MMU on
+//   4. cpu::init_mair_el2()   — memory attribute slots for page tables
+//   MMU activation (TCR/TTBR/SCTLR.M) belongs to a future MMU module        [NEXT]
 // ============================================================================
 
 use crate::uart::UART;
@@ -223,6 +224,75 @@ pub fn init_sctlr_el2() {
     .ok();
 }
 
+// ── MAIR_EL2 (Memory Attribute Indirection Register) ──────────────────────────
+// Purpose: define up to 8 named "memory material" slots (0-7) that page-table
+// entries reference via AttrIdx[2:0].  We use two:
+//
+//   Slot 0 — Normal Memory, Inner/Outer Write-Back Cacheable (0xFF)
+//             Used for: kernel code, stack, data, HFT hot-path pages.
+//             Why 0xFF? The encoding is:
+//               bits [7:4] = Outer attribs = 0b1111 (WB, Read-Allocate/Write-Allocate)
+//               bits [3:0] = Inner attribs = 0b1111 (WB, RA/WA)
+//             Full caching on both levels → lowest latency for DRAM reads.
+//
+//   Slot 1 — Device-nGnRnE (0x00)
+//             Used for: UART MMIO, NIC MMIO, any memory-mapped peripheral.
+//             nGnRnE = non-Gathering, non-Reordering, non-Early-Write-Ack.
+//             This is the strictest device type: the CPU guarantees each access
+//             hits the device exactly once, in order.  Hardware registers that
+//             trigger side-effects (e.g. UART TX FIFO) need this.
+//
+// Reference: ARM DDI 0487, search 'MAIR_EL2'.
+
+/// MAIR_EL2 Slot 0: Normal WB-Cached (Inner=WB RA/WA, Outer=WB RA/WA).
+/// Placed in bits [7:0] of the 64-bit MAIR register.
+const MAIR_ATTR0_NORMAL_WB: u64 = 0xFF << 0;
+
+/// MAIR_EL2 Slot 1: Device-nGnRnE (most strictly ordered device type).
+/// No caching, no gathering, no reordering — each access is atomic to the device.
+/// Placed in bits [15:8].
+const MAIR_ATTR1_DEVICE_NGNRNE: u64 = 0x00 << 8;
+
+/// Initialise MAIR_EL2 with the two memory attribute slots used by our
+/// Stage-1 page tables (TODO).
+///
+/// **Slot 0 (AttrIdx=0):** Normal WB-Cached — RAM, HFT pages.
+/// **Slot 1 (AttrIdx=1):** Device-nGnRnE  — UART, NIC MMIO.
+///
+/// Must be called before building Stage-1 page tables (TODO)
+/// so that AttrIdx fields in page table descriptors have a defined meaning
+/// when the MMU is activated.
+///
+/// # Safety
+/// Must be called from EL2 only.
+pub fn init_mair_el2() {
+    // Build the MAIR value from scratch — never read-modify-write.
+    // Only slots 0 and 1 are populated; slots 2–7 are left 0x00 (Device).
+    let mair: u64 = MAIR_ATTR0_NORMAL_WB      // bits [7:0]  = 0xFF (Normal WB-Cached)
+                  | MAIR_ATTR1_DEVICE_NGNRNE; // bits [15:8] = 0x00 (Device-nGnRnE)
+    // Explicitly OR-ing 0x00 is intentional:
+    // Device-nGnRnE encoding IS 0x00 per DDI 0487.
+    // Self-documents that Slot 1 is set, not forgotten.
+
+    // Safety: writing MAIR_EL2 at EL2 is architecturally permitted.
+    // ISB ensures subsequent page-table walks see the updated attributes.
+    unsafe {
+        core::arch::asm!(
+            "msr mair_el2, {mair}",
+            "isb",
+            mair = in(reg) mair,
+            options(nostack, nomem),
+        );
+    }
+
+    writeln!(
+        &mut &UART,
+        "[cpu ] MAIR_EL2  = {:#018x}  (Slot0=Normal-WB 0xFF, Slot1=Device-nGnRnE 0x00)",
+        mair
+    )
+    .ok();
+}
+
 // ── Readback / Verification ───────────────────────────────────────────────────
 
 /// Read the current value of CPTR_EL2 and return it.
@@ -250,6 +320,22 @@ pub fn read_sctlr_el2() -> u64 {
     unsafe {
         core::arch::asm!(
             "mrs {val}, sctlr_el2",
+            val = out(reg) val,
+            options(nostack, nomem),
+        );
+    }
+    val
+}
+
+/// Read the current value of MAIR_EL2 and return it.
+///
+/// # Safety
+/// Must be called from EL2 only.
+pub fn read_mair_el2() -> u64 {
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {val}, mair_el2",
             val = out(reg) val,
             options(nostack, nomem),
         );

@@ -64,6 +64,20 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     )
     .ok();
 
+    // ── Configure MAIR_EL2 ──────────────────────────────────────
+    // Register the two memory attribute slots used by Stage-1 page tables.
+    //   AttrIdx=0 → Normal WB-Cached (RAM, HFT hot-path pages).
+    //   AttrIdx=1 → Device-nGnRnE (UART MMIO, future NIC MMIO).
+    // This must be done before build_page_tables() so the AttrIdx fields in
+    // page-table descriptors have a defined meaning when the MMU activates.
+    cpu::init_mair_el2();
+    writeln!(
+        &mut &UART,
+        "[cpu ] MAIR_EL2  readback = {:#018x}  (verified)",
+        cpu::read_mair_el2()
+    )
+    .ok();
+
     // ── Memory Layout Report ───────────────────────────────────────────────
     // Print every memory layout constant over UART so that developers can
     // visually confirm the layout before the Buddy Allocator and MMU are
