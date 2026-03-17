@@ -155,6 +155,14 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
         }
     }
 
+    // ── Stage-1 Page Table construction ────────────────────────────
+    // Allocate one 4 KiB page from the PMM and fill it with 512 × 2 MiB Block
+    // Descriptors covering UART MMIO (Device-nGnRnE) and all RAM (Normal-WB).
+    // The returned physical address will be loaded into TTBR0_EL2.
+    //
+    // Safety: PMM is fully initialised and the HFT region is already carved out.
+    let _l1_pa = unsafe { memory::stage1::build_page_tables() };
+
     // Register the exception vector table with the CPU.
     // Safety: `exception_vectors` is correctly aligned (2KiB) and lives in
     // read-only executable memory for the lifetime of the hypervisor.
