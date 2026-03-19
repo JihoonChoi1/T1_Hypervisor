@@ -84,6 +84,12 @@ const DESC_AF: u64 = 1 << 10;
 /// ARM DDI 0487, search "VMSAv8-64 Block and Page descriptors".
 const DESC_AP_RW_EL2: u64 = 0b01 << 6;
 
+/// bits [7:6]: AP[2:1] = 0b11 → EL2 Read-Only.
+/// Bit 6 (AP[1]) = 1 (RES1), bit 7 (AP[2]) = 1 means Read-Only.
+/// Any write attempt from EL2 triggers a Permission Fault, enforcing W^X.
+/// ARM DDI 0487, search "VMSAv8-64 Block and Page descriptors".
+const DESC_AP_RO_EL2: u64 = 0b11 << 6;
+
 /// bits [9:8]: SH[1:0] = 0b11 → Inner Shareable.
 /// Required for Normal-WB-Cached pages so all cores see coherent data.
 /// Linux: PTE_SHARED = 3 << 8. Must NOT be set for Device memory.
@@ -140,9 +146,45 @@ fn l1_table_entry(l2_pa: usize) -> u64 {
     DESC_TABLE | pa_bits
 }
 
-/// L2 BLOCK entry: Normal WB-Cached, EL2 RW, Execute-Never.
-/// Used for general RAM and the HFT reserved slab.
-/// PA[47:21] is the physical 2 MiB-aligned base address.
+/// L2 BLOCK entry: Normal WB-Cached, EL2 **Read-Only**, Executable.
+/// Used exclusively for the kernel `.text` + `.rodata` 2 MiB block
+/// (`KERNEL_TEXT_BASE = 0x4020_0000`).  Hardware enforces W^X: any
+/// data write from EL2 into this block fires a Permission Fault.
+/// ARM DDI 0487 search "Stage 1 Block and page descriptor".
+#[inline(always)]
+fn block_normal_ro_x(pa: usize) -> u64 {
+    let pa_bits = (pa as u64) & 0x0000_FFFF_FFE0_0000; // PA[47:21]
+    DESC_BLOCK
+        | DESC_AF
+        | DESC_AP_RO_EL2  // RO — write attempt → Permission Fault
+        | DESC_SH_INNER
+        // DESC_XN intentionally absent — code must be executable
+        | attr_idx(ATTR_NORMAL_WB)
+        | pa_bits
+}
+
+/// L2 BLOCK entry: Normal WB-Cached, EL2 **Read-Only**, **Execute-Never**.
+/// Used exclusively for the kernel `.rodata` 2 MiB block
+/// (`KERNEL_RODATA_BASE = 0x4040_0000`).  Completes the full W^X invariant:
+/// no page is simultaneously writable and executable, AND no data page is
+/// executable.  Hardware: AP=RO prevents writes, XN prevents instruction fetch.
+/// ARM DDI 0487 search "VMSAv8-64 Block descriptor and Page descriptor formats".
+#[inline(always)]
+fn block_normal_ro_nx(pa: usize) -> u64 {
+    let pa_bits = (pa as u64) & 0x0000_FFFF_FFE0_0000; // PA[47:21]
+    DESC_BLOCK
+        | DESC_AF
+        | DESC_AP_RO_EL2  // RO — write attempt → Permission Fault
+        | DESC_SH_INNER
+        | DESC_XN         // NX — execute attempt → Permission Fault
+        | attr_idx(ATTR_NORMAL_WB)
+        | pa_bits
+}
+
+/// L2 BLOCK entry: Normal WB-Cached, EL2 Read-Write, **Execute-Never**.
+/// Used for all RAM except the kernel `.text` block: DTB region, kernel
+/// `.data`/`.bss`, boot stack, and the PMM heap.  W^X: prevents any
+/// dynamically-allocated or mutable memory from being executed as code.
 #[inline(always)]
 fn block_normal_rw_nx(pa: usize) -> u64 {
     let pa_bits = (pa as u64) & 0x0000_FFFF_FFE0_0000; // PA[47:21]
@@ -150,7 +192,7 @@ fn block_normal_rw_nx(pa: usize) -> u64 {
         | DESC_AF
         | DESC_AP_RW_EL2
         | DESC_SH_INNER
-        | DESC_XN
+        | DESC_XN         // NX — execute attempt → Permission Fault
         | attr_idx(ATTR_NORMAL_WB)
         | pa_bits
 }
@@ -243,23 +285,52 @@ pub unsafe fn build_page_tables() -> usize {
     let uart_block_base = UART_MMIO_BASE & !(BLOCK_2MIB - 1); // 2 MiB-align down
     l2a[l2_index(uart_block_base)] = block_device_rw_nx(uart_block_base);
 
-    // ── 5. L2_B: General RAM → Normal-WB (0x4000_0000..0x7800_0000) ─────────
+    // ── 5. L2_B: General RAM → W^X-enforced mapping (dynamic, from linker symbols) ──
     //
-    // Within the 1..2 GiB L2_B region:
-    //   l2_index(0x4000_0000) = (0x4000_0000 >> 21) & 0x1FF = 0x200 & 0x1FF = 0
-    // Each entry maps one 2 MiB block; entries 0..447 cover 896 MiB of RAM.
+    // We read the actual section start addresses from linker-exported symbols
+    // at runtime, then align them DOWN to the 2 MiB block boundary.  This means
+    // the mapping is correct regardless of how large each section grows — no
+    // hardcoded PA constants that could silently become wrong.
+    //
+    // Symbol layout (set by linker ALIGN(2M) between sections):
+    //   __text_start   → always 2 MiB-aligned (= BASE_ADDRESS = 0x4020_0000 today)
+    //   __rodata_start → next 2 MiB boundary after .text
+    //   __data_start   → next 2 MiB boundary after .rodata
+    //
+    // Safety: These are read-only linker symbols; value is the symbol address.
+    // `as *const u8 as usize` is the standard no_std idiom for extracting the
+    // numeric value of a linker symbol without dereferencing it.
+    unsafe extern "C" {
+        static __text_start: u8;
+        static __rodata_start: u8;
+        static __data_start: u8;
+    }
+    let text_block = unsafe { &__text_start as *const u8 as usize } & !(BLOCK_2MIB - 1);
+    let rodata_block = unsafe { &__rodata_start as *const u8 as usize } & !(BLOCK_2MIB - 1);
+    let data_block = unsafe { &__data_start as *const u8 as usize } & !(BLOCK_2MIB - 1);
+
     let mut pa = RAM_START;
     while pa < HFT_RESERVED_BASE {
-        l2b[l2_index(pa)] = block_normal_rw_nx(pa);
+        let desc = if pa >= text_block && pa < rodata_block {
+            // .text block(s): Read-Only, Executable
+            // If .text someday grows past 2 MiB, this correctly maps multiple blocks RO+X.
+            block_normal_ro_x(pa)
+        } else if pa >= rodata_block && pa < data_block {
+            // .rodata block(s): Read-Only, Execute-Never
+            block_normal_ro_nx(pa)
+        } else {
+            // DTB below .text / .data / .bss / heel / PMM heap: Writable, Execute-Never
+            block_normal_rw_nx(pa)
+        };
+        l2b[l2_index(pa)] = desc;
         pa += BLOCK_2MIB;
     }
 
-    // ── 6. L2_B: HFT reserved region → Normal-WB huge pages ─────────────────
+    // ── 6. L2_B: HFT reserved region → Normal-WB huge pages (RW+NX) ─────────
     //
     // 64 × 2 MiB Block entries (indices 448..511).
-    // Identical attribute to general RAM, but identified separately in the log
-    // to document the HFT huge-page intent.  Future MPAM / TLB-lock passes
-    // will add further differentiation here.
+    // HFT data pages: writable (order-book ring buffers etc.) but never
+    // executable — only the trading engine code (loaded via Stage-2) runs here.
     let mut pa = HFT_RESERVED_BASE;
     while pa < HFT_RESERVED_END {
         l2b[l2_index(pa)] = block_normal_rw_nx(pa);
@@ -288,17 +359,38 @@ pub unsafe fn build_page_tables() -> usize {
     .ok();
     writeln!(
         &mut &UART,
-        "[mmu ]   L2_B@ {:#010x}  RAM  idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX",
+        "[mmu ]   L2_B@ {:#010x}  DTB    idx {:3}       PA {:#010x}..{:#010x}  Normal-WB  RW+NX",
         l2b_pa,
         l2_index(RAM_START),
-        l2_index(HFT_RESERVED_BASE) - 1,
         RAM_START,
+        text_block,
+    )
+    .ok();
+    writeln!(
+        &mut &UART,
+        "[mmu ]   L2_B@ {:#010x}  TEXT   idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RO+X  ← W^X",
+        l2b_pa, l2_index(text_block), l2_index(rodata_block) - 1,
+        text_block, rodata_block,
+    ).ok();
+    writeln!(
+        &mut &UART,
+        "[mmu ]   L2_B@ {:#010x}  RODATA idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RO+NX ← W^X",
+        l2b_pa, l2_index(rodata_block), l2_index(data_block) - 1,
+        rodata_block, data_block,
+    ).ok();
+    writeln!(
+        &mut &UART,
+        "[mmu ]   L2_B@ {:#010x}  DATA   idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX",
+        l2b_pa,
+        l2_index(data_block),
+        l2_index(HFT_RESERVED_BASE) - 1,
+        data_block,
         HFT_RESERVED_BASE,
     )
     .ok();
     writeln!(
         &mut &UART,
-        "[mmu ]   L2_B@ {:#010x}  HFT  idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX  2MiB-huge",
+        "[mmu ]   L2_B@ {:#010x}  HFT    idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX  2MiB-huge",
         l2b_pa,
         l2_index(HFT_RESERVED_BASE),
         l2_index(HFT_RESERVED_END - BLOCK_2MIB),
@@ -307,4 +399,86 @@ pub unsafe fn build_page_tables() -> usize {
     ).ok();
 
     l1_pa
+}
+
+// ── MMU activation ────────────────────────────────────────────────────────────
+
+/// Enable the EL2 Stage-1 MMU.
+///
+/// Configures `TCR_EL2` and `TTBR0_EL2`, then sets `SCTLR_EL2.M = 1`
+/// with the mandatory barrier sequence from ARM DDI 0487.
+///
+/// # Arguments
+/// * `l1_pa` — Physical address of the L1 translation table, as returned by
+///             `build_page_tables()`.
+///
+/// # Safety
+/// * `build_page_tables()` must have been called before this.
+/// * `VBAR_EL2` must be installed before this call so that any translation
+///   fault during activation has a handler registered.
+/// * Must be called from EL2 only, on the boot core, before other cores start.
+/// * UART MMIO, kernel code, and stack must all be identity-mapped (VA=PA) in
+///   the tables at `l1_pa`. The first instruction after the final `ISB`
+///   executes under the live MMU.
+pub unsafe fn enable_mmu(l1_pa: usize) {
+    // ── TCR_EL2 ──────────────────────────────────────────────────────────────
+    // ARM DDI 0487, search "TCR_EL2 registers"
+    // DS=0 (48-bit output address; our highest PA is 0x8000_0000 < 40-bit).
+    //
+    // Field   Bits    Value   Meaning
+    // ------  ------  ------  -------------------------------------------------
+    // T0SZ    [5:0]   32      VA space = 2^(64-32) = 4 GiB  (VA[31:0])
+    // IRGN0   [9:8]   0b01    Inner Write-Back, Read/Write-Allocate
+    // ORGN0   [11:10] 0b01    Outer Write-Back, Read/Write-Allocate
+    // SH0     [13:12] 0b11    Inner Shareable
+    // TG0     [15:14] 0b00    4 KiB granule
+    // PS      [18:16] 0b010   40-bit Physical Address (1 TiB)
+    //                         Minimum PS covering our highest PA 0x8000_0000.
+    let tcr: u64 = 32              // T0SZ
+        | (0b01  << 8)             // IRGN0 = Inner WB-RA-WA
+        | (0b01  << 10)            // ORGN0 = Outer WB-RA-WA
+        | (0b11  << 12)            // SH0   = Inner Shareable
+        | (0b00  << 14)            // TG0   = 4 KiB granule
+        | (0b010 << 16); // PS    = 40-bit PA
+
+    // ── SCTLR_EL2 with M=1 ───────────────────────────────────────────────────
+    // Written from scratch — never read-modify-write (reset state is UNKNOWN).
+    // ARM DDI 0487, search "SCTLR_EL2 registers"
+    //
+    // Bit   Name   Value   Meaning
+    // ---   ----   -----   ----------------------------------------------------
+    //  0    M      1       Enable Stage-1 MMU.
+    //  3    SA     1       Stack-pointer alignment check (pre-MMU baseline).
+    //
+    // C (bit 2) and I (bit 12) cache bits remain 0; we enable data/instruction
+    // caches in a future step after performing proper cache invalidation.
+    const SCTLR_M: u64 = 1 << 0;
+    const SCTLR_SA: u64 = 1 << 3;
+    let sctlr: u64 = SCTLR_SA | SCTLR_M;
+
+    // ── Barrier-sequenced activation ─────────────────────────────────────────
+    //  References: Learn the architecture - AArch64 memory management Guide
+    //
+    //  1. Write TCR_EL2 + TTBR0_EL2.
+    //  2. DSB ISH — drain page-table writes so the Table Walk Unit sees them.
+    //  3. ISB     — flush pipeline; TCR/TTBR visible before MMU enable.
+    //  4. Write SCTLR_EL2 with M=1.
+    //  5. ISB     — MMU live; subsequent fetches are translated.
+    //
+    // Safety: UART, stack, and kernel .text are identity-mapped (VA=PA),
+    // so the translated PC after step 5 resolves to the same physical address.
+    unsafe {
+        core::arch::asm!(
+            "msr tcr_el2,    {tcr}",   // Step 1a: translation control
+            "msr ttbr0_el2,  {l1pa}",  // Step 1b: L1 table base address
+            "dsb ish",                 // Step 2:  drain page-table stores
+            "isb",                     // Step 3:  flush pipeline
+            "msr sctlr_el2,  {sctlr}", // Step 4:  enable MMU
+            "isb",                     // Step 5:  MMU live
+            tcr   = in(reg) tcr,
+            l1pa  = in(reg) l1_pa as u64,
+            sctlr = in(reg) sctlr,
+            options(nostack),
+        );
+    }
 }

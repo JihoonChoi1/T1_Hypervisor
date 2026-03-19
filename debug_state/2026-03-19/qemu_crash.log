@@ -1,0 +1,500 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `qemu-system-aarch64 -machine virt,virtualization=on -cpu cortex-a57 -m 1G -nographic -kernel target/aarch64-unknown-none/debug/T1_Hypervisor -d int`
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40083b24
+...with SPSR 0x600003c9
+...with ELR 0x40083b24
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL2 to EL2
+...with ESR 0x21/0x8600000e
+...with FAR 0x40085200
+...with SPSR 0x3c9
+...with ELR 0x40085200
+...to EL2 PC 0x40085200 PSTATE 0x3c9
+Taking exception 3 [Prefetch Abort] on CPU 0

@@ -161,13 +161,16 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // The returned physical address will be loaded into TTBR0_EL2.
     //
     // Safety: PMM is fully initialised and the HFT region is already carved out.
-    let _l1_pa = unsafe { memory::stage1::build_page_tables() };
+    let l1_pa = unsafe { memory::stage1::build_page_tables() };
 
-    // Register the exception vector table with the CPU.
+    // ── Exception vector table ─────────────────────────────────────────────
+    // Install VBAR_EL2 BEFORE building page tables and enabling the MMU.
+    // Any translation fault during MMU activation will jump to this table;
+    // without it, an activation fault causes an unrecoverable silent hang.
+    //
     // Safety: `exception_vectors` is correctly aligned (2KiB) and lives in
     // read-only executable memory for the lifetime of the hypervisor.
     unsafe {
-        // Import the symbol defined in exception.s.
         unsafe extern "C" {
             static exception_vectors: u8;
         }
@@ -179,6 +182,35 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
             options(nostack)
         );
     }
+
+    // ── Enable Stage-1 MMU ────────────────────────────────────────────────────
+    // Now that VBAR_EL2 is live, we can safely enable the MMU.  Any translation
+    // fault will be caught by the exception handler above.
+    //
+    // Safety: page tables are fully built, VBAR_EL2 is installed, all mapped
+    // regions are identity-mapped (VA=PA), so the PC remains valid after ISB.
+    unsafe { memory::stage1::enable_mmu(l1_pa) };
+
+    // Read back TCR_EL2 and SCTLR_EL2 to confirm the MMU was enabled.
+    let tcr_rb: u64;
+    let sctlr_rb: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, tcr_el2",   out(reg) tcr_rb,   options(nostack));
+        core::arch::asm!("mrs {}, sctlr_el2", out(reg) sctlr_rb, options(nostack));
+    }
+    writeln!(
+        &mut &UART,
+        "\n[mmu ] Stage-1 MMU enabled (2-level, T0SZ=32, 4KB granule)"
+    )
+    .ok();
+    writeln!(&mut &UART, "[mmu ] TCR_EL2   = {:#018x}", tcr_rb).ok();
+    writeln!(
+        &mut &UART,
+        "[mmu ] SCTLR_EL2 = {:#018x}  (M={})",
+        sctlr_rb,
+        sctlr_rb & 1,
+    )
+    .ok();
 
     // Print a banner to confirm the hypervisor booted successfully.
     writeln!(&mut &UART, "\r\n==========================================").ok();

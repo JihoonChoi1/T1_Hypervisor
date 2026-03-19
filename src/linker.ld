@@ -1,29 +1,56 @@
 ENTRY(_start)
 
-/* QEMU virt machine RAM starts here. We load the kernel at an offset to leave room for DTB. */
-BASE_ADDRESS = 0x40080000;
+/* ── Memory layout ──────────────────────────────────────────────────────────
+ *
+ * Physical address map (QEMU virt, -m 1G):
+ *
+ *   0x4000_0000  [2 MiB] DTB region          — RW+NX
+ *   0x4020_0000  [2 MiB] .text               — RO+X   ← kernel entry point
+ *   0x4040_0000  [2 MiB] .rodata             — RO+NX  ← read-only, not executable
+ *   0x4060_0000  [...]   .data / .bss / stack — RW+NX
+ *
+ * Each section boundary is aligned to 2 MiB so the Stage-1 L2 table can
+ * assign distinct permissions to each region via a single Block Descriptor.
+ * No L3 page tables needed.  Cost: ≤6 MiB of wasted address space (0.6% of 1 GiB).
+ *
+ * Permission summary (W^X fully enforced):
+ *   .text   RO+X   — hardware blocks writes; code is executable
+ *   .rodata RO+NX  — hardware blocks writes AND execution
+ *   .data   RW+NX  — hardware blocks execution; data is mutable
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+BASE_ADDRESS = 0x40200000;   /* 2 MiB past RAM_START — leaves 2 MiB for DTB */
 
 SECTIONS
 {
     . = BASE_ADDRESS;
 
-    /* Code section */
+    /* ── Code (RO+X) ─────────────────────────────────────────────────────── */
     .text : ALIGN(4K) {
-        KEEP(*(.text._start)) /* Ensure the entry point is placed first */
+        __text_start = .;       /* exported to Rust for dynamic MMU mapping */
+        KEEP(*(.text._start))   /* entry point must be first */
         *(.text .text.*)
     }
 
-    /* Read-only data */
+    /* Advance to the next 2 MiB boundary — .rodata gets its own L2 block. */
+    . = ALIGN(2M);
+
+    /* ── Read-Only data (RO+NX) ───────────────────────────────────────────── */
     .rodata : ALIGN(4K) {
+        __rodata_start = .;     /* exported to Rust for dynamic MMU mapping */
         *(.rodata .rodata.*)
     }
 
-    /* Initialized data */
+    /* Advance to the next 2 MiB boundary — mutable data gets its own L2 block. */
+    . = ALIGN(2M);
+
+    /* ── Mutable data (RW+NX) ─────────────────────────────────────────────── */
     .data : ALIGN(4K) {
+        __data_start = .;       /* exported to Rust for dynamic MMU mapping */
         *(.data .data.*)
     }
 
-    /* Uninitialized data (BSS). Must be zeroed during boot. */
+    /* Uninitialized data (BSS). Zeroed by boot.s before Rust runs. */
     .bss : ALIGN(4K) {
         __bss_start = .;
         *(.bss .bss.*)
@@ -31,28 +58,17 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* Boot stack: placed ABOVE the kernel image, grows downward.
-     * Isolates the stack from the DTB region (0x40000000-0x40080000)
-     * and from the kernel code/data sections.
-     * 64KB is sufficient for early boot before we set up proper per-CPU stacks. */
+    /* Boot stack: 64 KiB, grows downward. */
     .boot_stack (NOLOAD) : ALIGN(4K) {
         __boot_stack_bottom = .;
         . += 64K;
         __boot_stack_top = .;
     }
 
-    /* Round up to the next 4 KiB page boundary before marking the end of the
-     * kernel image.  Without this guard the PMM's first "free" page could
-     * overlap the last partial page of BSS or the boot stack, silently
-     * corrupting existing kernel data the moment the allocator hands it out.
-     *
-     * ALIGN(4096) is cheap — it wastes at most 4095 bytes of address space —
-     * and makes every address returned by BuddyAllocator::alloc() safe to use
-     * as a page frame without any masking or rounding on the Rust side. */
+    /* Round to a 4 KiB page so the PMM's first alloc never overlaps BSS. */
     . = ALIGN(4096);
     __kernel_end = .;
 
-    /* Discard debugging and build info sections to keep binary clean */
     /DISCARD/ : {
         *(.comment)
         *(.gnu*)
