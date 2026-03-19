@@ -11,8 +11,11 @@
 //   2. cpu::init_cptr_el2()   — open FP/SIMD to EL2 and EL1 guests
 //   3. cpu::init_sctlr_el2()  — CPU control defaults before MMU on
 //   4. cpu::init_mair_el2()   — memory attribute slots for page tables
-//   MMU activation (TCR/TTBR/SCTLR.M) belongs to a future MMU module        [NEXT]
+//   MMU activation (TCR/TTBR/SCTLR.M) belongs to a future MMU module
 // ============================================================================
+
+/// CPU topology detection: MPIDR_EL1 decoding, Management/HFT role assignment.
+pub mod topology;
 
 use crate::uart::UART;
 use core::fmt::Write;

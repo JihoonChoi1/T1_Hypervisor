@@ -223,6 +223,14 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     )
     .ok();
     writeln!(&mut &UART, "[boot] DTB located at: {:#010x}", dtb_ptr).ok();
+
+    // ── CPU Topology Detection ───────────────────────────────────────
+    // Reads MPIDR_EL1 to identify which physical core is executing and assigns
+    // it one of two roles: Management (Core 0) or Hft (all other cores).
+    // Secondary cores (TODO) will call this same function
+    // immediately after wakeup to determine their own behaviour.
+    let _core_info = cpu::topology::detect();
+
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 
     // Infinite low-power idle loop.
