@@ -9,6 +9,7 @@ use uart::UART;
 
 mod cpu;
 mod exception;
+mod irq;
 mod memory;
 
 // Pull in the assembly routines.
@@ -230,6 +231,12 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Secondary cores (TODO) will call this same function
     // immediately after wakeup to determine their own behaviour.
     let _core_info = cpu::topology::detect();
+
+    // ── GIC IRQ Steering ────────────────────────────────────
+    // Route all physical SPIs to the Management core (CPU 0) exclusively.
+    // HFT cores will call irq::gic::mask_gicc_hft() upon wakeup (TODO)
+    // for defence-in-depth hardware blocking at the CPU interface level.
+    irq::gic::init();
 
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 

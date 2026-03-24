@@ -20,6 +20,7 @@
 // ── Memory map ───────────────────────────────────────────────────────────────
 //
 //  L1 entry 0 → L2_A (covers 0x0000_0000..0x4000_0000)
+//    L2_A[64]  0x0800_0000 + 2 MiB  Device-nGnRnE  RW+NX  (GICv2 GICD + GICC MMIO)
 //    L2_A[72]  0x0900_0000 + 2 MiB  Device-nGnRnE  RW+NX  (UART MMIO)
 //
 //  L1 entry 1 → L2_B (covers 0x4000_0000..0x8000_0000)
@@ -37,7 +38,7 @@
 // ============================================================================
 
 use crate::{
-    memory::{HFT_RESERVED_BASE, HFT_RESERVED_END, RAM_START, UART_MMIO_BASE, pmm},
+    memory::{GICD_BASE, HFT_RESERVED_BASE, HFT_RESERVED_END, RAM_START, UART_MMIO_BASE, pmm},
     uart::UART,
 };
 use core::fmt::Write;
@@ -277,11 +278,17 @@ pub unsafe fn build_page_tables() -> usize {
     l1[l1_index(UART_MMIO_BASE)] = l1_table_entry(l2a_pa); // index 0
     l1[l1_index(RAM_START)] = l1_table_entry(l2b_pa); // index 1
 
-    // ── 4. L2_A: UART MMIO → Device-nGnRnE ─────────────────────────────────
+    // ── 4. L2_A: Device MMIO → Device-nGnRnE ───────────────────────────────
     //
+    // GICv2 GICD base: 0x0800_0000 → L2_A index (0x0800_0000 >> 21) & 0x1FF = 64.
+    // GICC base: 0x0801_0000 — within the same 2 MiB block [0x0800_0000, 0x0820_0000).
+    // One Device-nGnRnE 2 MiB block covers both GICD and GICC.
+    let gic_block_base = GICD_BASE & !(BLOCK_2MIB - 1); // 2 MiB-align down → 0x0800_0000
+    l2a[l2_index(gic_block_base)] = block_device_rw_nx(gic_block_base);
+
     // UART is at 0x0900_0000. Within the 0..1 GiB L2_A region:
-    //   l2_index(0x0900_0000) = (0x0900_0000 >> 21) & 0x1FF = 72
-    // The whole 2 MiB block [0x0900_0000, 0x0B00_0000) is mapped as Device.
+    // PL011 UART base: 0x0900_0000 → L2_A index (0x0900_0000 >> 21) & 0x1FF = 72.
+    // The whole 2 MiB block [0x0900_0000, 0x0920_0000) is mapped as Device.
     let uart_block_base = UART_MMIO_BASE & !(BLOCK_2MIB - 1); // 2 MiB-align down
     l2a[l2_index(uart_block_base)] = block_device_rw_nx(uart_block_base);
 

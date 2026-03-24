@@ -21,7 +21,6 @@
 pub mod pmm;
 pub mod stage1;
 
-
 // ── Physical RAM ─────────────────────────────────────────────────────────────
 //
 // QEMU virt: the primary RAM bank starts at GPA 0x4000_0000.
@@ -62,6 +61,37 @@ pub const UART_MMIO_SIZE: usize = 0x1000; // 4 KiB
 
 /// One-past-the-last byte of the UART MMIO region (exclusive).
 pub const UART_MMIO_END: usize = UART_MMIO_BASE + UART_MMIO_SIZE;
+
+// ── GICv2 (Generic Interrupt Controller v2) MMIO ─────────────────────────────
+//
+// QEMU virt places a GICv2 (`arm,cortex-a15-gic`) at fixed addresses.
+// Confirmed from `qemu-system-aarch64 -machine virt,virtualization=on
+// -machine dumpdtb=... | dtc`, which reports:
+//
+//   reg = <0x00 0x8000000 0x00 0x10000   ← GICD (64 KiB)
+//          0x00 0x8010000 0x00 0x10000   ← GICC (64 KiB, virtual CPU I/F)
+//          0x00 0x8030000 0x00 0x10000   ← GICH (hypervisor ctrl, 64 KiB)
+//          0x00 0x8040000 0x00 0x10000>  ← GICV (virtual GICC, 64 KiB)
+//
+// These regions are Device-nGnRnE — never cache, never reorder.
+// These addresses must be explicitly mapped in the MMU stage-1 page tables
+// as Device memory before being accessed.
+//
+// Reference: ARM IHI0048B "ARM GIC Architecture Specification v2.0".
+
+/// Base address of the GICv2 Distributor (GICD) MMIO region.
+pub const GICD_BASE: usize = 0x0800_0000;
+
+/// Size of the GICD MMIO region (64 KiB).
+#[allow(dead_code)]
+pub const GICD_SIZE: usize = 0x10000;
+
+/// Base address of the GICv2 CPU Interface (GICC) MMIO region.
+pub const GICC_BASE: usize = 0x0801_0000;
+
+/// Size of the GICC MMIO region (64 KiB).
+#[allow(dead_code)]
+pub const GICC_SIZE: usize = 0x10000;
 
 // ── HFT Engine Reserved Region ───────────────────────────────────────────────
 //
