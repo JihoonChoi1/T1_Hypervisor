@@ -238,12 +238,21 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // for defence-in-depth hardware blocking at the CPU interface level.
     irq::gic::init();
 
+    // ── Secondary Core Wakeup & HFT Isolation ───────────────────
+    // Wake CPU 1–3 via PSCI CPU_ON, wait for each to:
+    //   • install VBAR_EL2 + MMU
+    //   • detect its role (HFT)
+    //   • seal its GICC (PMR=0x00, CTLR=0)
+    // Then broadcast SEV to release them into their trading loops.
+    cpu::secondary::boot_secondary_cores();
+    cpu::secondary::release_secondary_cores();
+
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 
-    // Infinite low-power idle loop.
-    // Future phases will replace this with the hypervisor's main event loop.
+    // Management core idle loop — future phases replace this with the
+    // hypervisor's IRQ-driven event loop.
     loop {
-        unsafe { core::arch::asm!("wfe") };
+        unsafe { core::arch::asm!("wfi") };
     }
 }
 

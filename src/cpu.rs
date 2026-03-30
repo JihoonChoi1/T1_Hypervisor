@@ -17,6 +17,12 @@
 /// CPU topology detection: MPIDR_EL1 decoding, Management/HFT role assignment.
 pub mod topology;
 
+/// PSCI (Power State Coordination Interface) SMC calls for secondary core power-on.
+pub mod psci;
+
+/// Secondary core wakeup, stack setup, and HFT isolation via GICC masking.
+pub mod secondary;
+
 use crate::uart::UART;
 use core::fmt::Write;
 
@@ -120,51 +126,35 @@ pub fn read_hcr_el2() -> u64 {
 // Applies when HCR_EL2.E2H == 0 (our non-VHE mode).
 //
 // WHY THIS MATTERS: the reset value of CPTR_EL2 is IMPLEMENTATION DEFINED.
-// On several real chips (Cortex-A72, A76, AWS Graviton) FPEN resets to 0b00,
-// meaning *any* FP/SIMD instruction at EL1 immediately traps to EL2.  Linux
-// uses NEON very early in boot (memset, crypto), so without this fix the
-// guest crashes before printing its first character.
+// On several real chips (Cortex-A72, A76, AWS Graviton) TFP resets to an
+// UNKNOWN value. If TFP == 1, *any* FP/SIMD instruction at EL1 or EL2 immediately
+// traps to EL2. Linux uses NEON very early in boot, so without clearing TFP,
+// the guest crashes quickly.
 //
-// HFT FPU ENABLEMENT — 3-layer requirement:
+// In classic EL2 (E2H=0):
+// - Bit 31: TCPAC (Trap CPACR_EL1 accesses to EL2)
+// - Bit 20: TTA (Trap Trace Accesses to EL2)
+// - Bit 10: TFP (Trap Floating Point and Advanced SIMD to EL2)
 //
-//   Layer 1 (EL2, THIS FUNCTION) — CPTR_EL2.FPEN=0b11:
-//     EL2 will never trap FP/SIMD instructions.  ✅ Done here.
-//
-//   Layer 2 (EL1, TODO) — CPACR_EL1.FPEN=0b11:
-//     Before the first ERET into the HFT Engine VM, we must explicitly write
-//     CPACR_EL1 from EL2 (as part of VCPU initialisation).  A bare-metal HFT
-//     engine has no OS to set this automatically.  If left at the UNKNOWN reset
-//     value, the first FPU instruction in EL1 will fault.
-//     TODO: set CPACR_EL1 in vcpu::init_hft_engine().
-//
-//   Layer 3 (Context Switch, TODO) — Eager FP Save/Restore:
-//     On every VM switch, all 32 SIMD registers (Q0–Q31, 512 bytes total) must
-//     be saved/restored unconditionally (eager, not lazy).  Lazy save introduces
-//     a first-use trap whose latency is non-deterministic — unacceptable for HFT.
-//     TODO: save/restore SIMD state in context_switch.s.
+// We want to write 0 to all these bits to ensure no traps occur.
 
-/// Bits [21:20] — FPEN: FP/SIMD trap control.
-/// `0b11` = no trap at any EL.  `0b00` = trap at all ELs (reset default on
-/// many chips — dangerous).  We always write 0b11 to open FP/SIMD to EL1/EL2.
-/// Bit [8]  TFP  and bit [31] TCPAC are left 0 (no legacy FP trap, guest may
-/// access CPACR_EL1 to manage its own FP save/restore strategy).
-const CPTR_FPEN_NO_TRAP: u64 = 0b11 << 20;
+const CPTR_EL2_NO_TRAPS: u64 = 0;
 
-/// Open FP/SIMD access to EL2 and EL1/EL0.  Satisfies Layer 1 of the
-/// HFT FPU enablement requirement (see block comment above).
+/// Open FP/SIMD access to EL2 and EL1/EL0 by clearing the TFP bit.
+/// Satisfies Layer 1 of the HFT FPU enablement requirement (see block comment above).
 ///
 /// Must be called before any ERET to EL1, i.e. before launching a guest.
 /// Failure to call this causes an immediate Undefined Instruction trap the
-/// moment the guest kernel executes its first NEON / FP instruction.
+/// moment the guest kernel executes its first NEON / FP instruction if TFP was 1.
 ///
 /// # Safety
 /// Must be called from EL2 only.
 pub fn init_cptr_el2() {
-    // Build a clean CPTR_EL2 value from scratch (never read-modify-write a
-    // register documented as having UNKNOWN reset fields).
-    //   FPEN[21:20] = 0b11 → no FP/SIMD trap at any EL
-    //   All other bits     = 0 (TFP=0, TCPAC=0, ZEN=0 for no SVE trap)
-    let cptr: u64 = CPTR_FPEN_NO_TRAP;
+    // Build a clean CPTR_EL2 value from scratch.
+    // TFP=0 means no FP/SIMD traps.
+    // TCPAC=0 means no traps on CPACR_EL1 access.
+    // TTA=0 means no traps on trace registers.
+    let cptr: u64 = CPTR_EL2_NO_TRAPS;
 
     unsafe {
         core::arch::asm!(
@@ -177,7 +167,7 @@ pub fn init_cptr_el2() {
 
     writeln!(
         &mut &UART,
-        "[cpu ] CPTR_EL2 = {:#018x}  (FPEN=0b11: FP/SIMD open to EL1/EL2)",
+        "[cpu ] CPTR_EL2 = {:#018x}  (TFP=0: FP/SIMD open to EL1/EL2)",
         cptr
     )
     .ok();

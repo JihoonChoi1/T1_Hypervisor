@@ -293,7 +293,7 @@ unsafe fn init_gicc_management() {
 /// Sets `GICC_PMR = 0x00`: no interrupt of any priority can be forwarded
 /// to this CPU by the GIC hardware, regardless of `GICD_ITARGETSR`.
 ///
-/// Called from each secondary core's startup path (TODO) immediately
+/// Called from each secondary core's startup path immediately
 /// after `VBAR_EL2` is set and before the core enters its trading loop.
 ///
 /// # Safety

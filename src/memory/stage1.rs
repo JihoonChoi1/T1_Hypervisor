@@ -42,6 +42,12 @@ use crate::{
     uart::UART,
 };
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Physical address of the L1 translation table.
+/// Written by CPU 0 in `build_page_tables()` and read by secondary cores
+/// in `enable_mmu_secondary()` to reuse the same shared tables.
+static L1_TABLE_PA: AtomicU64 = AtomicU64::new(0);
 
 // ── Sizes ─────────────────────────────────────────────────────────────────────
 
@@ -405,6 +411,9 @@ pub unsafe fn build_page_tables() -> usize {
         HFT_RESERVED_END,
     ).ok();
 
+    // Store l1_pa so secondary cores can reuse the same table.
+    L1_TABLE_PA.store(l1_pa as u64, Ordering::Release);
+
     l1_pa
 }
 
@@ -448,42 +457,132 @@ pub unsafe fn enable_mmu(l1_pa: usize) {
         | (0b00  << 14)            // TG0   = 4 KiB granule
         | (0b010 << 16); // PS    = 40-bit PA
 
-    // ── SCTLR_EL2 with M=1 ───────────────────────────────────────────────────
+    // ── SCTLR_EL2 ────────────────────────────────────────────────────────────
     // Written from scratch — never read-modify-write (reset state is UNKNOWN).
     // ARM DDI 0487, search "SCTLR_EL2 registers"
     //
     // Bit   Name   Value   Meaning
     // ---   ----   -----   ----------------------------------------------------
     //  0    M      1       Enable Stage-1 MMU.
-    //  3    SA     1       Stack-pointer alignment check (pre-MMU baseline).
-    //
-    // C (bit 2) and I (bit 12) cache bits remain 0; we enable data/instruction
-    // caches in a future step after performing proper cache invalidation.
+    //  2    C      1       Data cache enable (WB-Cached MAIR slots now active).
+    //  3    SA     1       Stack-pointer alignment check.
+    // 12    I      1       Instruction cache enable.
+    // 19    WXN    1       Write implies XN — hardware W^X enforcement.
+    //                      Defence-in-depth: even if a future page-table entry
+    //                      accidentally sets RW+X, hardware blocks execution.
     const SCTLR_M: u64 = 1 << 0;
+    const SCTLR_C: u64 = 1 << 2;
     const SCTLR_SA: u64 = 1 << 3;
-    let sctlr: u64 = SCTLR_SA | SCTLR_M;
+    const SCTLR_I: u64 = 1 << 12;
+    const SCTLR_WXN: u64 = 1 << 19;
+    let sctlr: u64 = SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN;
 
     // ── Barrier-sequenced activation ─────────────────────────────────────────
     //  References: Learn the architecture - AArch64 memory management Guide
     //
-    //  1. Write TCR_EL2 + TTBR0_EL2.
-    //  2. DSB ISH — drain page-table writes so the Table Walk Unit sees them.
-    //  3. ISB     — flush pipeline; TCR/TTBR visible before MMU enable.
-    //  4. Write SCTLR_EL2 with M=1.
-    //  5. ISB     — MMU live; subsequent fetches are translated.
+    //  1. TLBI ALLE2 — Invalidate all EL2 TLB entries on this core.
+    //  2. DSB ISH    — Ensure TLB invalidation completes.
+    //  3. IC IALLU   — Invalidate all EL2 Instruction Cache lines on this core.
+    //  4. DSB ISH    — Ensure I-Cache invalidation completes.
+    //  5. ISB        — Flush pipeline.
+    //  6. Write TCR_EL2 + TTBR0_EL2.
+    //  7. DSB ISH    — Drain page-table writes so the Table Walk Unit sees them.
+    //  8. ISB        — Flush pipeline; TCR/TTBR visible before MMU enable.
+    //  9. Write SCTLR_EL2 with M=1 (+ C, I, WXN).
+    // 10. ISB        — MMU live; subsequent fetches are translated.
     //
     // Safety: UART, stack, and kernel .text are identity-mapped (VA=PA),
-    // so the translated PC after step 5 resolves to the same physical address.
+    // so the translated PC after Step 9 resolves to the same physical address.
     unsafe {
         core::arch::asm!(
-            "msr tcr_el2,    {tcr}",   // Step 1a: translation control
-            "msr ttbr0_el2,  {l1pa}",  // Step 1b: L1 table base address
-            "dsb ish",                 // Step 2:  drain page-table stores
-            "isb",                     // Step 3:  flush pipeline
-            "msr sctlr_el2,  {sctlr}", // Step 4:  enable MMU
-            "isb",                     // Step 5:  MMU live
+            "tlbi alle2",              // Step 1: invalidate TLBs
+            "dsb  ish",                // Step 2: wait for TLB invalidation
+            "ic   iallu",              // Step 3: invalidate I-cache
+            "dsb  ish",                // Step 4: wait for I-cache invalidation
+            "isb",                     // Step 5: flush pipeline
+            "msr tcr_el2,    {tcr}",   // Step 6a: translation control
+            "msr ttbr0_el2,  {l1pa}",  // Step 6b: L1 table base address
+            "dsb ish",                 // Step 7:  drain page-table stores
+            "isb",                     // Step 8:  flush pipeline
+            "msr sctlr_el2,  {sctlr}", // Step 9:  enable MMU + caches + WXN
+            "isb",                     // Step 10: MMU live
             tcr   = in(reg) tcr,
             l1pa  = in(reg) l1_pa as u64,
+            sctlr = in(reg) sctlr,
+            options(nostack),
+        );
+    }
+}
+
+// ── Secondary-core MMU activation ─────────────────────────────────────────────
+
+/// Activate the Stage-1 MMU on a secondary (HFT) core.
+///
+/// CPU 0 has already built the page tables and stored the L1 physical address
+/// in `TTBR0_EL2`.  Secondary cores share the **same** identity-mapped tables,
+/// so we just need to write the same `TCR_EL2` / `TTBR0_EL2` values and set
+/// `SCTLR_EL2.M = 1`.
+///
+/// The L1 physical address is read back from the static variable written by
+/// `build_page_tables()` via a shared atomic.
+///
+/// # Safety
+/// * Must be called after `VBAR_EL2` is installed on this core.
+/// * CPU 0 must have completed `build_page_tables()` before this is called.
+/// * Must be called from EL2 on a secondary core.
+pub unsafe fn enable_mmu_secondary() {
+    // Read the L1 table physical address stored by CPU 0.
+    let l1_pa = L1_TABLE_PA.load(core::sync::atomic::Ordering::Acquire);
+
+    // Structural Assertion: CPU 0 must have written this before waking us.
+    if l1_pa == 0 {
+        panic!("CRITICAL BUG: L1_TABLE_PA not set by CPU 0 before waking secondaries!");
+    }
+
+    // Same TCR_EL2 as CPU 0 (constants, not runtime-derived).
+    let tcr: u64 = 32
+        | (0b01 << 8)    // IRGN0 = Inner WB-RA-WA
+        | (0b01 << 10)   // ORGN0 = Outer WB-RA-WA
+        | (0b11 << 12)   // SH0   = Inner Shareable
+        | (0b00 << 14)   // TG0   = 4 KiB granule
+        | (0b010 << 16); // PS    = 40-bit PA
+
+    // Same SCTLR_EL2 as CPU 0: MMU + D-cache + I-cache + SA + WXN.
+    const SCTLR_M: u64 = 1 << 0;
+    const SCTLR_C: u64 = 1 << 2;
+    const SCTLR_SA: u64 = 1 << 3;
+    const SCTLR_I: u64 = 1 << 12;
+    const SCTLR_WXN: u64 = 1 << 19;
+    let sctlr: u64 = SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN;
+
+    // PSCI firmware may leave stale EL2 TLB entries on secondary cores.
+    // Invalidate before loading our page tables to prevent stale translations.
+    //
+    //  1. TLBI ALLE2 — Invalidate all EL2 TLB entries on this core.
+    //  2. DSB ISH    — Ensure TLB invalidation completes.
+    //  3. IC IALLU   — Invalidate all EL2 Instruction Cache lines on this core.
+    //  4. DSB ISH    — Ensure I-Cache invalidation completes.
+    //  5. ISB        — Flush pipeline.
+    //  6. Write TCR_EL2 + TTBR0_EL2.
+    //  7. DSB ISH    — Drain page-table writes so Table Walk Unit sees them.
+    //  8. ISB        — Flush pipeline; TCR/TTBR visible before MMU enable.
+    //  9. Write SCTLR_EL2 with M=1 (+ C, I, WXN).
+    // 10. ISB        — MMU live.
+    unsafe {
+        core::arch::asm!(
+            "tlbi alle2",              // Step 1: invalidate EL2 TLB on this core
+            "dsb  ish",                // Step 2: wait for TLB invalidation
+            "ic   iallu",              // Step 3: invalidate I-cache
+            "dsb  ish",                // Step 4: wait for I-cache invalidation
+            "isb",                     // Step 5: flush pipeline
+            "msr tcr_el2,    {tcr}",   // Step 6a: translation control
+            "msr ttbr0_el2,  {l1pa}",  // Step 6b: L1 table base address
+            "dsb ish",                 // Step 7:  drain page-table stores
+            "isb",                     // Step 8:  flush pipeline
+            "msr sctlr_el2,  {sctlr}", // Step 9:  enable MMU + caches + WXN
+            "isb",                     // Step 10: MMU live
+            tcr   = in(reg) tcr,
+            l1pa  = in(reg) l1_pa,
             sctlr = in(reg) sctlr,
             options(nostack),
         );
