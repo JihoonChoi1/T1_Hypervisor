@@ -6,6 +6,11 @@
 //! Reference: ARM PrimeCell UART (PL011) Technical Reference Manual
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Spinlock protecting the UART for SMP-safe output.
+/// Acquired once per `writeln!` / `write!` call via `write_fmt`.
+static UART_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Base physical address of the PL011 UART on QEMU `virt` machine.
 const PL011_BASE: usize = 0x0900_0000;
@@ -127,6 +132,29 @@ impl fmt::Write for &Uart {
         Uart::write_str(self, s);
         Ok(())
     }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        while UART_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let result = fmt::write(self, args);
+        UART_LOCK.store(false, Ordering::Release);
+        result
+    }
+}
+
+/// Force-release the UART spinlock.
+///
+/// Must be called at the very top of the panic handler.  If a panic fires
+/// while any core holds the lock (e.g. mid-`writeln!`), every other core
+/// would spin forever waiting for the lock to be released — silencing the
+/// panic message entirely.  Storing `false` unconditionally is safe here
+/// because the panic path is non-recoverable and single-writer.
+pub fn force_unlock() {
+    UART_LOCK.store(false, Ordering::Release);
 }
 
 /// The global early-boot UART instance.

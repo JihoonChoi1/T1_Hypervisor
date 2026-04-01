@@ -11,6 +11,7 @@ mod cpu;
 mod exception;
 mod irq;
 mod memory;
+mod time;
 
 // Pull in the assembly routines.
 core::arch::global_asm!(include_str!("boot.s"));
@@ -230,7 +231,7 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // it one of two roles: Management (Core 0) or Hft (all other cores).
     // Secondary cores (TODO) will call this same function
     // immediately after wakeup to determine their own behaviour.
-    let _core_info = cpu::topology::detect();
+    let core_info = cpu::topology::detect();
 
     // ── GIC IRQ Steering ────────────────────────────────────
     // Route all physical SPIs to the Management core (CPU 0) exclusively.
@@ -238,11 +239,18 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // for defence-in-depth hardware blocking at the CPU interface level.
     irq::gic::init();
 
+    // ── Deterministic Timer & PMU Setup (CPU 0) ─────────────────
+    // Configure the virtual timer offset and start the PMU cycle counter
+    // on this (Management) core.  Each secondary core will call the same
+    // function after the INIT_DONE_FLAG barrier is released.
+    time::init_per_core(core_info.core_id);
+
     // ── Secondary Core Wakeup & HFT Isolation ───────────────────
     // Wake CPU 1–3 via PSCI CPU_ON, wait for each to:
     //   • install VBAR_EL2 + MMU
     //   • detect its role (HFT)
     //   • seal its GICC (PMR=0x00, CTLR=0)
+    //   • initialise its own timer offset + PMU cycle counter
     // Then broadcast SEV to release them into their trading loops.
     cpu::secondary::boot_secondary_cores();
     cpu::secondary::release_secondary_cores();
@@ -262,6 +270,10 @@ fn panic(info: &PanicInfo) -> ! {
     // We attempt to print even if UART was not yet initialized.
     // In the worst case the output is garbled, but it is still more useful
     // than a silent hang.
+    // Release the UART spinlock before printing.  A panic may fire while
+    // another core (or this core) holds the lock mid-writeln!; without this
+    // the panic message would never appear and all cores would spin forever.
+    uart::force_unlock();
     writeln!(&mut &UART, "\n[PANIC] {}", info).ok();
     loop {
         unsafe { core::arch::asm!("wfe") };

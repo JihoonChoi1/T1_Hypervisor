@@ -170,7 +170,7 @@ pub unsafe extern "C" fn secondary_main(cpu_id: u64) -> ! {
     }
 
     // ── Step 3: Detect topology ───────────────────────────────────────────
-    let _info = crate::cpu::topology::detect();
+    let core_info = crate::cpu::topology::detect();
 
     // ── Step 4: Hardware-seal this core against all IRQs/FIQs ────────────
     unsafe { crate::irq::gic::mask_gicc_hft() };
@@ -186,7 +186,13 @@ pub unsafe extern "C" fn secondary_main(cpu_id: u64) -> ! {
         unsafe { core::arch::asm!("wfe", options(nostack)) };
     }
 
-    // ── Step 7: HFT busy-poll trading loop (placeholder) ─────────────────
+    // ── Step 7: Per-core Timer & PMU init ────────────────────────────────
+    // CNTVOFF_EL2, CNTV_CTL_EL0, and PMU cycle counter registers are all
+    // banked per-CPU.  CPU 0 configured its own copies in kmain; we must
+    // configure ours here — after the barrier so the order is deterministic.
+    crate::time::init_per_core(core_info.core_id);
+
+    // ── Step 8: HFT busy-poll trading loop (placeholder) ─────────────────
     writeln!(
         &mut &UART,
         "[hft ] CPU {} entering trading loop (busy-poll placeholder).",
