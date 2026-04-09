@@ -88,7 +88,7 @@ impl BuddyAllocator {
 
     // ── init ──────────────────────────────────────────────────────────────────
 
-    /// Populate the free lists with every page in `[pool_start, PMM_END)`.
+    /// Populate the free lists with every page in `[pool_start, RAM_END)`.
     ///
     /// # Safety
     /// * Called exactly once before any `alloc`/`free`.
@@ -96,8 +96,10 @@ impl BuddyAllocator {
     /// * Single-core execution (early boot).
     ///
     /// The entire physical range `[pool_start, RAM_END)` is added to the free
-    /// lists — including the HFT reserved slice at the top.  Call
-    /// `prewarm_hft_region()` immediately after to carve that slice out.
+    /// lists.  HFT and Management pages are separated by page coloring at
+    /// allocation time via `cache_color::alloc_hft_page()` (colors 0–7) and
+    /// `cache_color::alloc_mgmt_page()` (colors 8–15).  No sub-range is
+    /// permanently carved out here.
     pub unsafe fn init(&mut self, pool_start: usize) {
         // 1. Fix up sentinel heads so every list is empty but self-referential.
         for order in 0..MAX_ORDER {
@@ -181,8 +183,8 @@ impl BuddyAllocator {
 
     /// Remove a specific block at `addr` (of `order`) from the free pool.
     ///
-    /// Used by `prewarm_hft_region()` to carve out the HFT slab at a known
-    /// address.  Returns `true` on success.
+    /// Removes a specific block at `addr` (of `order`) from the free pool.
+    /// Returns `true` on success.
     ///
     /// # Safety
     /// `addr` must be naturally aligned to `PAGE_SIZE << order`.
@@ -350,6 +352,138 @@ impl BuddyAllocator {
         }
         false
     }
+
+    /// Allocate an order-0 page (4 KiB) satisfying `predicate(pa) == true`.
+    ///
+    /// Scans every order's free list from order-0 upward.  When a block is
+    /// found that *contains* a matching page, the block is extracted from its
+    /// free list and split down to exactly the matching order-0 page.  Halves
+    /// that do not contain the target page are returned to their respective
+    /// free lists — exactly as `alloc()` does.
+    ///
+    /// # `guaranteed_order` hint
+    /// If the caller can prove that any block of order >= K is guaranteed to
+    /// contain at least one page satisfying `predicate`, pass `Some(K)`.
+    ///
+    /// For page coloring with N colors: `K = log2(N)`.  Proof: a block of
+    /// order K has `2^K = N` consecutive pages whose colors are `0..N` mod N
+    /// — all N colors appear exactly once, so any color-based predicate matches.
+    ///
+    /// With the hint the scan short-circuits on the first block at or above K
+    /// (no inner sub-page loop), and the split-down phase skips the sub-page
+    /// check for halves that are still large enough to guarantee a match.
+    /// Pass `None` for a fully generic predicate with no guarantee.
+    ///
+    /// # Guarantee
+    /// If any order-0 page satisfying `predicate` remains in the pool,
+    /// this function will find and return it.  False negatives are impossible.
+    ///
+    /// # Complexity
+    /// O(total free blocks across all orders); inner sub-page scans are skipped
+    /// once `search_order >= guaranteed_order`.  Boot-time only.
+    ///
+    /// # Safety
+    /// Must be called after `init()`.
+    pub unsafe fn alloc_with_filter<F>(
+        &mut self,
+        predicate: F,
+        guaranteed_order: Option<usize>,
+    ) -> Option<usize>
+    where
+        F: Fn(usize) -> bool,
+    {
+        // `guaranteed` is the threshold above which every block is guaranteed
+        // to contain a matching page.  MAX_ORDER (unreachable) disables the hint.
+        let guaranteed = guaranteed_order.unwrap_or(MAX_ORDER);
+
+        for search_order in 0..MAX_ORDER {
+            let head: *const FreeBlock = core::ptr::addr_of!(self.free_lists[search_order]);
+
+            // Scan this order's free list for a block containing a matching page.
+            let mut cur = unsafe { (*head).next };
+            let mut found_block: Option<usize> = None;
+
+            'list: while cur != head as *mut _ {
+                let block_pa = cur as usize;
+
+                if search_order >= guaranteed {
+                    // Every block at this order contains all colors — take the
+                    // first one without scanning sub-pages.
+                    found_block = Some(block_pa);
+                    break 'list;
+                }
+
+                // Does this block contain at least one page satisfying predicate?
+                // Check each order-0 sub-page within the block.
+                let num_pages = 1usize << search_order;
+                for i in 0..num_pages {
+                    if predicate(block_pa + i * PAGE_SIZE) {
+                        found_block = Some(block_pa);
+                        break 'list;
+                    }
+                }
+                cur = unsafe { (*cur).next };
+            }
+
+            let Some(found_pa) = found_block else {
+                continue; // No matching block in this order; try the next order up.
+            };
+
+            // Remove the matching block from its free list.
+            let removed = unsafe { self.remove_from_list(found_pa, search_order) };
+            assert!(
+                removed,
+                "pmm: alloc_with_filter remove_from_list inconsistency"
+            );
+            self.free_pages -= 1 << search_order;
+
+            // Split the block down, always keeping the half that contains
+            // a page satisfying predicate, returning the other half to its list.
+            let mut cur_pa = found_pa;
+            let mut cur_order = search_order;
+
+            while cur_order > 0 {
+                cur_order -= 1;
+                let half = PAGE_SIZE << cur_order;
+                let left_pa = cur_pa;
+                let right_pa = cur_pa + half;
+
+                // If the left half is still large enough to guarantee a match,
+                // skip the sub-page scan and always keep left.
+                let left_has_match = if cur_order >= guaranteed {
+                    true
+                } else {
+                    let n = 1usize << cur_order;
+                    let mut found = false;
+                    for i in 0..n {
+                        if predicate(left_pa + i * PAGE_SIZE) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                };
+
+                if left_has_match {
+                    // Keep left, return right to free list.
+                    unsafe { self.push_free(right_pa, cur_order) };
+                    self.free_pages += 1 << cur_order;
+                    cur_pa = left_pa;
+                } else {
+                    // Keep right, return left to free list.
+                    unsafe { self.push_free(left_pa, cur_order) };
+                    self.free_pages += 1 << cur_order;
+                    cur_pa = right_pa;
+                }
+            }
+
+            // cur_pa is now an order-0 page satisfying predicate.
+            assert!(predicate(cur_pa), "pmm: alloc_with_filter split logic bug");
+            return Some(cur_pa);
+        }
+
+        None // No page satisfying predicate found anywhere in the pool.
+    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
@@ -418,39 +552,16 @@ pub unsafe fn free_blocks_at_order(order: usize) -> usize {
     unsafe { (*core::ptr::addr_of_mut!(PMM)).free_blocks_at_order(order) }
 }
 
-/// Pre-carve the HFT reserved region out of the free pool permanently.
+/// Allocate one order-0 page from the global PMM satisfying `predicate`.
 ///
-/// Called once at boot before any guest VM starts.  After this call the
-/// `[HFT_RESERVED_BASE, HFT_RESERVED_END)` range is exclusively owned by the
-/// trading engine and will never be returned to the general allocator.
+/// Thin wrapper around `BuddyAllocator::alloc_with_filter`.
+/// See that method for full documentation and complexity analysis.
 ///
 /// # Safety
-/// Must be called after `pmm::init()`, exactly once.
-pub unsafe fn prewarm_hft_region() {
-    use crate::memory::{HFT_RESERVED_BASE, HFT_RESERVED_SIZE};
-
-    // Compute order at compile time: PAGE_SIZE << HFT_ORDER == HFT_RESERVED_SIZE.
-    const HFT_ORDER: usize = {
-        let mut o = 0usize;
-        let mut sz = PAGE_SIZE;
-        while sz < HFT_RESERVED_SIZE {
-            sz <<= 1;
-            o += 1;
-        }
-        assert!(
-            sz == HFT_RESERVED_SIZE,
-            "HFT_RESERVED_SIZE must be a power-of-two multiple of PAGE_SIZE"
-        );
-        o
-    };
-    // writeln!(
-    //     &mut &UART,
-    //     "pmm: prewarm HFT reserved region at {HFT_ORDER}"
-    // )
-    //.ok();
-    let ok = unsafe { (*core::ptr::addr_of_mut!(PMM)).alloc_at(HFT_RESERVED_BASE, HFT_ORDER) };
-    assert!(
-        ok,
-        "pmm: failed to prewarm HFT reserved region at {HFT_RESERVED_BASE:#x}"
-    );
+/// Must be called after `pmm::init()`.  Not for use on the HFT hot path.
+pub unsafe fn alloc_with_filter<F>(predicate: F, guaranteed_order: Option<usize>) -> Option<usize>
+where
+    F: Fn(usize) -> bool,
+{
+    unsafe { (*core::ptr::addr_of_mut!(PMM)).alloc_with_filter(predicate, guaranteed_order) }
 }

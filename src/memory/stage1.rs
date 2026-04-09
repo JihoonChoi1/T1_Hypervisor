@@ -24,8 +24,8 @@
 //    L2_A[72]  0x0900_0000 + 2 MiB  Device-nGnRnE  RW+NX  (UART MMIO)
 //
 //  L1 entry 1 → L2_B (covers 0x4000_0000..0x8000_0000)
-//    L2_B[0..447]  0x4000_0000..0x7800_0000  Normal-WB  RW+NX  (general RAM)
-//    L2_B[448..511] 0x7800_0000..0x8000_0000  Normal-WB  RW+NX  (HFT 2 MiB huge)
+//    L2_B[0..511]  0x4000_0000..0x8000_0000  Normal-WB  RW+NX  (all RAM, W^X on kernel)
+//    HFT pages are scattered through this range via page coloring — no fixed sub-region.
 //
 // ── Resources ────────────────────────────────────────────────────────────────
 //  PMM allocations: 3 × Order-0 pages (12 KiB total)
@@ -38,7 +38,7 @@
 // ============================================================================
 
 use crate::{
-    memory::{GICD_BASE, HFT_RESERVED_BASE, HFT_RESERVED_END, RAM_START, UART_MMIO_BASE, pmm},
+    memory::{GICD_BASE, RAM_START, UART_MMIO_BASE, pmm},
     uart::UART,
 };
 use core::fmt::Write;
@@ -225,7 +225,7 @@ fn block_device_rw_nx(pa: usize) -> u64 {
 ///   3. L2_B table (covers 0x4000_0000..0x8000_0000 — all RAM + HFT)
 ///
 /// # Safety
-/// * Called after `pmm::init()` and `pmm::prewarm_hft_region()`.
+/// * Called after `pmm::init()` and `cache_color::init_hft_pool()`.
 /// * Called before `enable_mmu()` (NEXT).
 /// * Single-core early boot only.
 pub unsafe fn build_page_tables() -> usize {
@@ -322,31 +322,24 @@ pub unsafe fn build_page_tables() -> usize {
     let rodata_block = unsafe { &__rodata_start as *const u8 as usize } & !(BLOCK_2MIB - 1);
     let data_block = unsafe { &__data_start as *const u8 as usize } & !(BLOCK_2MIB - 1);
 
+    // ── 6. L2_B: all RAM → Normal-WB huge pages, W^X enforced ──────────────────
+    //
+    // 512 × 2 MiB Block entries (indices 0..511 covering 0x4000_0000..0x8000_0000).
+    // HFT pages are color-filtered at allocation time (cache_color module) and
+    // scattered through this range — no separate fixed sub-region needed.
     let mut pa = RAM_START;
-    while pa < HFT_RESERVED_BASE {
+    while pa < RAM_END {
         let desc = if pa >= text_block && pa < rodata_block {
-            // .text block(s): Read-Only, Executable
-            // If .text someday grows past 2 MiB, this correctly maps multiple blocks RO+X.
+            // .text block(s): Read-Only, Executable (W^X)
             block_normal_ro_x(pa)
         } else if pa >= rodata_block && pa < data_block {
-            // .rodata block(s): Read-Only, Execute-Never
+            // .rodata block(s): Read-Only, Execute-Never (W^X)
             block_normal_ro_nx(pa)
         } else {
-            // DTB below .text / .data / .bss / heel / PMM heap: Writable, Execute-Never
+            // DTB / .data / .bss / PMM heap / HFT pages (scattered): RW+NX
             block_normal_rw_nx(pa)
         };
         l2b[l2_index(pa)] = desc;
-        pa += BLOCK_2MIB;
-    }
-
-    // ── 6. L2_B: HFT reserved region → Normal-WB huge pages (RW+NX) ─────────
-    //
-    // 64 × 2 MiB Block entries (indices 448..511).
-    // HFT data pages: writable (order-book ring buffers etc.) but never
-    // executable — only the trading engine code (loaded via Stage-2) runs here.
-    let mut pa = HFT_RESERVED_BASE;
-    while pa < HFT_RESERVED_END {
-        l2b[l2_index(pa)] = block_normal_rw_nx(pa);
         pa += BLOCK_2MIB;
     }
 
@@ -396,20 +389,11 @@ pub unsafe fn build_page_tables() -> usize {
         "[mmu ]   L2_B@ {:#010x}  DATA   idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX",
         l2b_pa,
         l2_index(data_block),
-        l2_index(HFT_RESERVED_BASE) - 1,
+        l2_index(RAM_END - BLOCK_2MIB),
         data_block,
-        HFT_RESERVED_BASE,
+        RAM_END,
     )
     .ok();
-    writeln!(
-        &mut &UART,
-        "[mmu ]   L2_B@ {:#010x}  HFT    idx {:3}..{:3}  PA {:#010x}..{:#010x}  Normal-WB  RW+NX  2MiB-huge",
-        l2b_pa,
-        l2_index(HFT_RESERVED_BASE),
-        l2_index(HFT_RESERVED_END - BLOCK_2MIB),
-        HFT_RESERVED_BASE,
-        HFT_RESERVED_END,
-    ).ok();
 
     // Store l1_pa so secondary cores can reuse the same table.
     L1_TABLE_PA.store(l1_pa as u64, Ordering::Release);

@@ -103,7 +103,7 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     .ok();
     writeln!(
         &mut &UART,
-        "[mem ]   PMM pool      {:#010x} - {:#010x}  ({} MiB, free for Buddy Alloc)",
+        "[mem ]   PMM pool      {:#010x} - {:#010x}  ({} MiB, Buddy Allocator)",
         memory::RAM_START,
         memory::PMM_END,
         (memory::PMM_END - memory::RAM_START) / (1024 * 1024),
@@ -111,10 +111,9 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     .ok();
     writeln!(
         &mut &UART,
-        "[mem ]   HFT reserved  {:#010x} - {:#010x}  ({} MiB, pinned 2 MiB huge pages)",
-        memory::HFT_RESERVED_BASE,
-        memory::HFT_RESERVED_END,
-        memory::HFT_RESERVED_SIZE / (1024 * 1024),
+        "[mem ]   HFT budget    {} MiB ({} pages, color-filtered from pool)",
+        memory::HFT_POOL_TARGET_SIZE / (1024 * 1024),
+        memory::HFT_POOL_TARGET_SIZE / memory::pmm::PAGE_SIZE,
     )
     .ok();
 
@@ -130,10 +129,6 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
 
     // SAFETY: single-core boot; pool_start is page-aligned per linker script.
     unsafe { memory::pmm::init(pool_start) };
-
-    // Remove the HFT slab from the general free pool before any other
-    // allocation happens.  After this call the trading engine owns it.
-    unsafe { memory::pmm::prewarm_hft_region() };
 
     // Print per-order free block inventory for verification.
     writeln!(&mut &UART, "\r\n[pmm ] Buddy Allocator initialised:").ok();
@@ -254,6 +249,25 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Then broadcast SEV to release them into their trading loops.
     cpu::secondary::boot_secondary_cores();
     cpu::secondary::release_secondary_cores();
+
+    // ── Cache Partitioning PoC ──────────────────────────────────────
+    // 1. Print L2 cache geometry and heuristic page-color configuration.
+    // 2. Pre-allocate all HFT-colored pages from the full PMM pool (color
+    //    filter: 0–7).  Each page is immediately touched to warm L2.
+    //    Pages are held in HFT_POOL_PAGES[] for Phase 4 VM construction.
+    // 3. Run a small color-verification PoC against the pool.
+    //
+    // The L2D_CACHE_REFILL PMU counter (PMEVCNTR0_EL0, event 0x17) was already
+    // armed in time::init_per_core().  Meaningful measurements require a real
+    // workload on multiple cores and real RPi4 hardware (QEMU = 0).
+    memory::cache_color::print_info();
+
+    // Safety: PMM fully initialised; single-core boot; must be called before
+    // hft_pool_alloc_page() or warm_hft_cache().
+    unsafe { memory::cache_color::init_hft_pool() };
+
+    // Safety: PMM fully initialised; boot-time only.
+    unsafe { memory::cache_color::run_poc_verification(4) };
 
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 

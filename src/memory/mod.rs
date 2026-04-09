@@ -18,6 +18,7 @@
 //   4. stage1.rs uses these ranges for MMU page tables.
 // ============================================================================
 
+pub mod cache_color;
 pub mod pmm;
 pub mod stage1;
 
@@ -93,55 +94,50 @@ pub const GICC_BASE: usize = 0x0801_0000;
 #[allow(dead_code)]
 pub const GICC_SIZE: usize = 0x10000;
 
-// ── HFT Engine Reserved Region ───────────────────────────────────────────────
+// ── HFT Engine Memory Budget ──────────────────────────────────────────────────
 //
-// A contiguous region of physical RAM exclusively reserved for the HFT
-// trading engine VM.  This region is:
+// HFT and Management pages are separated by **page coloring**, not by a fixed
+// physical address range.  The Buddy Allocator manages the entire RAM from
+// __kernel_end to RAM_END; HFT pages are obtained via
+// `cache_color::alloc_hft_page()` (colors 0–7) and Management pages via
+// `cache_color::alloc_mgmt_page()` (colors 8–15).
 //
-//   • Pre-allocated at hypervisor boot. (TODO)
-//   • Never returned to the general Buddy Allocator free pool.
-//   • Mapped with 2 MiB huge pages and WB-Cached attributes. (TODO)
-//   • Pinned: the MMU entry is never evicted from the TLB while trading runs.
-//   • Zero runtime allocation: the entire HFT heap is carved from here at
-//     init and divided into fixed-size arenas.  No malloc on the hot path.
+// Having a dedicated fixed address range for HFT is not needed and would waste
+// ~50 % of the reserved pages (those whose page color falls in the Management
+// range) while hiding them from both workloads.
 //
-// Sizing rationale:
-//   128 MiB gives the HFT engine VM enough room for:
-//     - Its binary image and BSS (~1 MiB)
-//     - Order book ring buffers              (~8 MiB per instrument, ×8 = 64 MiB)
-//     - Market data / feed parser buffers    (~16 MiB)
-//     - Pre-allocated message arenas         (~32 MiB)
-//     - Headroom for future strategy growth  (~8 MiB)
-//   Total: ~129 MiB → rounded up to 128 MiB for huge-page alignment.
+// Sizing rationale for HFT_POOL_TARGET_SIZE (128 MiB):
+//   - Binary image + BSS          ~1 MiB
+//   - Order book ring buffers      ~8 MiB × 8 instruments = 64 MiB
+//   - Market-data / feed buffers  ~16 MiB
+//   - Pre-allocated message arenas~32 MiB
+//   - Strategy headroom            ~8 MiB
+//   Total: ~129 MiB → rounded to 128 MiB (32768 × 4 KiB pages).
 //
-// Placement: top 128 MiB of RAM_END.
-//   - Keeps it far from the kernel image at RAM_START+offset.
-//   - Keeps it far from the Management VM's Stage-2 region, which will grow
-//     upward from just above __kernel_end.
+// Pages are allocated one at a time via `cache_color::alloc_hft_page()` during
+// VM construction (TODO) and mapped into the HFT VM's Stage-2
+// page tables.  This means HFT pages are scattered through RAM but all share
+// cache colors 0–7, providing the L2 set separation heuristic.
 
-/// Size of the HFT Engine's exclusive physical memory reservation, in bytes.
-pub const HFT_RESERVED_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
-
-/// First byte of the HFT reserved region (placed at the top of RAM).
-pub const HFT_RESERVED_BASE: usize = RAM_END - HFT_RESERVED_SIZE; // 0x7800_0000
-
-/// One-past-the-last byte of the HFT reserved region (== RAM_END).
-pub const HFT_RESERVED_END: usize = RAM_END; // 0x8000_0000
+/// Target physical memory budget for the HFT trading engine, in bytes.
+///
+/// Used by VM construction to know how many colored pages to allocate.
+/// There is no fixed base address — pages are scattered through RAM and
+/// identified solely by `cache_color::color_of(pa) < 8`.
+pub const HFT_POOL_TARGET_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
 
 // ── General Allocator Region ─────────────────────────────────────────────────
 //
-// The Buddy Allocator manages the memory between the end
-// of the kernel image and the start of the HFT reserved region.
-//
-// __kernel_end is a linker-script symbol; its runtime value is used by
-// pmm::BuddyAllocator::init() as the lower bound.  We define the upper bound
-// here so that pmm.rs does not need to import HFT_RESERVED_BASE directly —
-// it imports PMM_END instead, keeping the dependency graph clean.
+// The Buddy Allocator manages ALL memory from __kernel_end to RAM_END.
+// No sub-range is permanently carved out at boot.  Color filtering at
+// allocation time (cache_color::alloc_hft_page / alloc_mgmt_page) provides
+// the HFT ↔ Management cache separation without wasting half the pool.
 
-/// Upper bound of the general-purpose physical memory pool managed by the
-/// Buddy Allocator.  Memory from `__kernel_end` up to (but not including)
-/// this address is available for Management VM, page tables, and kernel heap.
-pub const PMM_END: usize = HFT_RESERVED_BASE; // 0x7800_0000
+/// Upper bound of the physical memory pool managed by the Buddy Allocator.
+///
+/// Equals RAM_END: the entire RAM (minus the kernel image) is available.
+/// HFT and Management pages are separated by page color at allocation time.
+pub const PMM_END: usize = RAM_END;
 
 // ── Compile-time Sanity Checks ───────────────────────────────────────────────
 //
@@ -152,21 +148,10 @@ pub const PMM_END: usize = HFT_RESERVED_BASE; // 0x7800_0000
 const _: () = {
     assert!(RAM_START < RAM_END, "RAM_START must be below RAM_END");
     assert!(RAM_SIZE == 1 << 30, "RAM_SIZE must be exactly 1 GiB");
-    assert!(
-        HFT_RESERVED_BASE >= RAM_START,
-        "HFT region must be within RAM"
-    );
-    assert!(
-        HFT_RESERVED_END == RAM_END,
-        "HFT region must end at RAM_END"
-    );
-    assert!(
-        HFT_RESERVED_SIZE % (2 * 1024 * 1024) == 0,
-        "HFT_RESERVED_SIZE must be a multiple of 2 MiB (huge-page boundary)"
-    );
-    assert!(
-        PMM_END == HFT_RESERVED_BASE,
-        "PMM_END must equal HFT_RESERVED_BASE"
-    );
+    assert!(PMM_END == RAM_END, "PMM_END must equal RAM_END");
     assert!(UART_MMIO_BASE < RAM_START, "UART MMIO must be outside RAM");
+    assert!(
+        HFT_POOL_TARGET_SIZE % (2 * 1024 * 1024) == 0,
+        "HFT_POOL_TARGET_SIZE must be a multiple of 2 MiB (huge-page boundary)"
+    );
 };

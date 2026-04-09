@@ -54,6 +54,7 @@ const CNTV_CTL_UNMASK: u64 = 0; // bit 0 (ENABLE) = 0, bit 1 (IMASK) = 0
 //              Mandatory for HFT — a 32-bit counter overflows every ~4 seconds.
 /// PMCR value: enable all counters, 64-bit cycle counter, reset cycle count.
 const PMCR_INIT: u64 = (1 << 0)  // E:  global enable
+                      | (1 << 1)  // P:  reset all event counters to 0
                       | (1 << 2)  // C:  reset cycle counter to 0
                       | (1 << 6); // LC: 64-bit cycle counter
 
@@ -61,8 +62,27 @@ const PMCR_INIT: u64 = (1 << 0)  // E:  global enable
 //
 // Writing 1 to a bit enables the corresponding counter.
 // Bit 31 — C: Enable PMCCNTR_EL0 (the cycle counter).
-/// Enable the hardware cycle counter.
+/// Enable the hardware cycle counter (PMCCNTR_EL0).
 const PMCNTENSET_CYCLE: u64 = 1 << 31;
+
+/// Enable event counter 0 (PMEVCNTR0_EL0) which will track L2D_CACHE_REFILL.
+const PMCNTENSET_EVT0: u64 = 1 << 0;
+
+// PMEVTYPER0_EL0 (ARM DDI 0487, search 'PMEVTYPER<n>_EL0')
+//
+// Selects the event that PMEVCNTR0_EL0 counts.
+// Bits [9:0] — evtCount: PMU event ID.
+//
+// Event 0x17 = L2D_CACHE_REFILL (ARM DDI 0487, search "0x0017, L2D_CACHE_REFILL"):
+//   Counts L2 data cache refills — i.e. cache misses that required a fetch
+//   from the next memory level (L3 or main memory).
+//   On Cortex-A72 this counts per-core accesses that missed the shared 1MB L2.
+//
+// NOTE: QEMU does not emulate PMU event counters. This register write is
+//   accepted without error on QEMU but PMEVCNTR0_EL0 will always read 0.
+//   Meaningful measurements require real RPi4/RPi5 hardware.
+/// PMU event ID for L2 data cache refills (L2 misses that go to main memory).
+const PMEVTYPER_L2D_CACHE_REFILL: u64 = 0x17;
 
 // PMUSERENR_EL0 (ARM DDI 0487, search 'PMUSERENR_EL0')
 //
@@ -153,6 +173,42 @@ pub fn cntfrq() -> u64 {
     read_cntfrq()
 }
 
+/// Read the L2 data cache refill counter (`PMEVCNTR0_EL0`).
+///
+/// Returns the number of L2 cache misses (refills from main memory) accumulated
+/// since the last `init_per_core()` call on this core.  The counter is configured
+/// in `init_per_core()` via `PMEVTYPER0_EL0 = 0x17` (L2D_CACHE_REFILL event).
+///
+/// An `ISB` is issued before the read to prevent speculative reordering across
+/// preceding memory accesses — essential for accurate before/after measurements.
+///
+/// # QEMU limitation
+/// QEMU does not emulate PMU event counters.  This function will always return 0
+/// on QEMU regardless of actual memory access patterns.  Meaningful readings
+/// require real Cortex-A72 (RPi4) or Cortex-A76 (RPi5) hardware.
+///
+/// # Usage
+/// ```rust
+/// let before = time::read_l2_refill_count();
+/// // ... memory accesses under measurement ...
+/// let after = time::read_l2_refill_count();
+/// let misses = after - before;
+/// ```
+#[inline]
+#[allow(dead_code)]
+pub fn read_l2_refill_count() -> u64 {
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "isb",
+            "mrs {v}, pmevcntr0_el0",
+            v = out(reg) val,
+            options(nostack, nomem),
+        );
+    }
+    val
+}
+
 /// Perform per-core deterministic timer and PMU initialisation.
 ///
 /// **Must be called exactly once per physical core**, from that core's own
@@ -234,15 +290,34 @@ pub fn init_per_core(cpu_id: u8) {
         );
     }
 
-    // ── 4. PMCNTENSET_EL0: enable the cycle counter ───────────────────────
+    // ── 4. PMEVTYPER0_EL0: select L2D_CACHE_REFILL event ────────────────
+    // Assign PMU event 0x17 (L2D_CACHE_REFILL) to event counter 0 BEFORE
+    // enabling the counter.  Configuring the event type first ensures the
+    // counter never accumulates cycles against the wrong (reset-value) event.
+    //
+    // Bit [31] — P: Do not count in EL1.  Leave 0 to count across all ELs.
+    //
+    // QEMU limitation: event counters are not emulated; PMEVCNTR0_EL0 reads 0.
+    // On real Cortex-A72 (RPi4) hardware this counter increments on each L2
+    // cache miss, providing a direct measurement of cache pressure.
+    unsafe {
+        core::arch::asm!(
+            "msr pmevtyper0_el0, {v}",
+            "isb",
+            v = in(reg) PMEVTYPER_L2D_CACHE_REFILL,
+            options(nostack, nomem),
+        );
+    }
+
+    // ── 4b. PMCNTENSET_EL0: enable the cycle counter and event counter 0 ──
     // Writing bit 31 = 1 starts PMCCNTR_EL0 counting.
-    // Event counters (bits 0–30) are left disabled; they will be configured
-    // later (Cache Partitioning / PMU event tracking).
+    // Bit 0 enables event counter 0 (L2D_CACHE_REFILL), which is now armed
+    // with the correct event type from the write above.
     unsafe {
         core::arch::asm!(
             "msr pmcntenset_el0, {v}",
             "isb",
-            v = in(reg) PMCNTENSET_CYCLE,
+            v = in(reg) PMCNTENSET_CYCLE | PMCNTENSET_EVT0,
             options(nostack, nomem),
         );
     }
