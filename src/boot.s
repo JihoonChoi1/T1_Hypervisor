@@ -49,7 +49,9 @@ _start:
     ldr     x2, =__bss_end
 .L_bss_loop:
     cmp     x1, x2
-    b.eq    .L_bss_done
+    b.hs    .L_bss_done     // Branch if x1 >= x2 (unsigned). b.eq would skip the
+                            // end if __bss_end is not 8-byte aligned — x1 would
+                            // overshoot past x2 and loop forever past RAM_END.
     str     xzr, [x1], #8   // Store 0 (xzr) and increment address by 8 bytes
     b       .L_bss_loop
 

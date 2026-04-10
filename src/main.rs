@@ -240,6 +240,15 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // function after the INIT_DONE_FLAG barrier is released.
     time::init_per_core(core_info.core_id);
 
+    // ── CPU Frequency Pinning ────────────────────────────────────
+    // Lock the ARM core clock before secondary cores start.  DVFS
+    // transitions would invalidate PMCCNTR_EL0 timestamps and stall
+    // the HFT pipeline.
+    // QEMU: no-op (mailbox not emulated).
+    // RPi4 (--features rpi4): sends SET_CLOCK_RATE via VideoCore
+    // firmware mailbox (property channel 8).
+    cpu::freq::init_freq();
+
     // ── Secondary Core Wakeup & HFT Isolation ───────────────────
     // Wake CPU 1–3 via PSCI CPU_ON, wait for each to:
     //   • install VBAR_EL2 + MMU

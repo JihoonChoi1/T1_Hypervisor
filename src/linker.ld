@@ -55,6 +55,8 @@ SECTIONS
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(8);       /* Ensure __bss_end is 8-byte aligned so boot.s can
+                               safely zero BSS in 8-byte (xzr) increments. */
         __bss_end = .;
     }
 

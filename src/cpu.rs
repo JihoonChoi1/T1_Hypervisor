@@ -14,6 +14,9 @@
 //   MMU activation (TCR/TTBR/SCTLR.M) belongs to a future MMU module
 // ============================================================================
 
+/// CPU frequency pinning: VideoCore mailbox SET_CLOCK_RATE (QEMU no-op).
+pub mod freq;
+
 /// CPU topology detection: MPIDR_EL1 decoding, Management/HFT role assignment.
 pub mod topology;
 

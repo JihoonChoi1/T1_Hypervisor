@@ -139,6 +139,29 @@ pub const HFT_POOL_TARGET_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
 /// HFT and Management pages are separated by page color at allocation time.
 pub const PMM_END: usize = RAM_END;
 
+// ── BCM2711 Peripheral High MMIO (RPi4 only) ─────────────────────────────────
+//
+// The BCM2711 high peripheral block starts at ARM physical 0xFE00_0000.
+// This includes the VideoCore mailbox (0xFE00_B880) used for firmware
+// property-tag requests (SET_CLOCK_RATE, etc.).
+//
+// stage1.rs maps the containing 2 MiB block (0xFE00_0000) as Device-nGnRnE
+// using MBOX_MMIO_BASE as the anchor address.
+//
+// This region is NOT present on the QEMU virt machine; all paths that access
+// it are compiled only when `--features rpi4` is set.
+//
+// Reference: raspberrypi/firmware wiki "Accessing mailboxes";
+//            bcm283x.dtsi (compatible = "brcm,bcm2835-mbox", reg = 0x7e00b880);
+//            bcm2711.dtsi (ranges = <0x7e000000 0x0 0xfe000000 ...>)
+//              → VC bus 0x7E00_B880 maps to ARM physical 0xFE00_B880.
+
+/// Base address of the BCM2711 VideoCore mailbox MMIO region (ARM physical).
+/// Bus address 0x7E00_B880 maps to ARM physical 0xFE00_B880 on BCM2711.
+/// stage1.rs aligns this down to the 2 MiB block (0xFE00_0000) for mapping.
+#[cfg(feature = "rpi4")]
+pub const MBOX_MMIO_BASE: usize = 0xFE00_B880;
+
 // ── Compile-time Sanity Checks ───────────────────────────────────────────────
 //
 // These assertions are evaluated at compile time by the Rust compiler.

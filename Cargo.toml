@@ -3,6 +3,11 @@ name = "T1_Hypervisor"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enable BCM2711 (Raspberry Pi 4) hardware-specific paths.
+# Default build targets QEMU virt; RPi4 paths are compiled in with --features rpi4.
+rpi4 = []
+
 [dependencies]
 
 [[bin]]

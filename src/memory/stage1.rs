@@ -41,6 +41,8 @@ use crate::{
     memory::{GICD_BASE, RAM_START, UART_MMIO_BASE, pmm},
     uart::UART,
 };
+#[cfg(feature = "rpi4")]
+use crate::memory::MBOX_MMIO_BASE;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -254,25 +256,34 @@ pub unsafe fn build_page_tables() -> usize {
         );
     };
 
-    // ── 1. Allocate three 4 KiB pages ───────────────────────────────────────
+    // ── 1. Allocate page table pages ────────────────────────────────────────
     // Safety: PMM is initialised; alloc(0) returns a 4KiB-aligned address.
-    let l1_pa = unsafe { pmm::alloc(0) }.expect("stage1: OOM — L1 table");
+    let l1_pa  = unsafe { pmm::alloc(0) }.expect("stage1: OOM — L1 table");
     let l2a_pa = unsafe { pmm::alloc(0) }.expect("stage1: OOM — L2_A table");
     let l2b_pa = unsafe { pmm::alloc(0) }.expect("stage1: OOM — L2_B table");
+    // RPi4 only: VideoCore mailbox is at 0xFE00_B880 (L1 index 3 — 3 GiB region).
+    // A third L2 table (L2_C) is required to cover 0xC000_0000..0xFFFF_FFFF.
+    // Section 4-B below maps the 2 MiB block at 0xFE00_0000 as Device-nGnRnE.
+    #[cfg(feature = "rpi4")]
+    let l2c_pa = unsafe { pmm::alloc(0) }.expect("stage1: OOM — L2_C table");
 
-    // ── 2. Zero all three pages (Invalid descriptor = 0x0) ──────────────────
+    // ── 2. Zero all pages (Invalid descriptor = 0x0) ────────────────────────
     // Safety: each address is owned, PAGE_SIZE-aligned, and PAGE_SIZE bytes.
     unsafe {
-        core::ptr::write_bytes(l1_pa as *mut u8, 0, pmm::PAGE_SIZE);
+        core::ptr::write_bytes(l1_pa  as *mut u8, 0, pmm::PAGE_SIZE);
         core::ptr::write_bytes(l2a_pa as *mut u8, 0, pmm::PAGE_SIZE);
         core::ptr::write_bytes(l2b_pa as *mut u8, 0, pmm::PAGE_SIZE);
     }
+    #[cfg(feature = "rpi4")]
+    unsafe { core::ptr::write_bytes(l2c_pa as *mut u8, 0, pmm::PAGE_SIZE); }
 
     // Reinterpret each page as a mutable array of 512 u64 descriptors.
-    // Safety: 4KiB alignment ≥ u64's 8-byte requirement; we own all three pages.
-    let l1 = unsafe { &mut *(l1_pa as *mut [u64; TABLE_ENTRIES]) };
+    // Safety: 4KiB alignment ≥ u64's 8-byte requirement; we own all pages.
+    let l1  = unsafe { &mut *(l1_pa  as *mut [u64; TABLE_ENTRIES]) };
     let l2a = unsafe { &mut *(l2a_pa as *mut [u64; TABLE_ENTRIES]) };
     let l2b = unsafe { &mut *(l2b_pa as *mut [u64; TABLE_ENTRIES]) };
+    #[cfg(feature = "rpi4")]
+    let l2c = unsafe { &mut *(l2c_pa as *mut [u64; TABLE_ENTRIES]) };
 
     // ── 3. L1 → TABLE entries pointing to L2 tables ─────────────────────────
     //
@@ -282,7 +293,10 @@ pub unsafe fn build_page_tables() -> usize {
     //
     // Safety: UART_MMIO_BASE [0x09..] has L1 index 0; RAM_START [0x40..] has index 1.
     l1[l1_index(UART_MMIO_BASE)] = l1_table_entry(l2a_pa); // index 0
-    l1[l1_index(RAM_START)] = l1_table_entry(l2b_pa); // index 1
+    l1[l1_index(RAM_START)]      = l1_table_entry(l2b_pa); // index 1
+    // RPi4 only: mailbox at 0xFE00_B880 → L1 index 3 (3 GiB region).
+    #[cfg(feature = "rpi4")]
+    { l1[l1_index(MBOX_MMIO_BASE)] = l1_table_entry(l2c_pa); } // index 3
 
     // ── 4. L2_A: Device MMIO → Device-nGnRnE ───────────────────────────────
     //
@@ -297,6 +311,18 @@ pub unsafe fn build_page_tables() -> usize {
     // The whole 2 MiB block [0x0900_0000, 0x0920_0000) is mapped as Device.
     let uart_block_base = UART_MMIO_BASE & !(BLOCK_2MIB - 1); // 2 MiB-align down
     l2a[l2_index(uart_block_base)] = block_device_rw_nx(uart_block_base);
+
+    // ── 4-B. L2_C: BCM2711 peripheral high block → Device-nGnRnE (RPi4 only) ─
+    //
+    // Mailbox base 0xFE00_B880 → 2 MiB-align → 0xFE00_0000 → L2_C index 496.
+    // The single Device-nGnRnE block covers the entire 0xFE00_0000..0xFE1F_FFFF
+    // range, which includes the VideoCore mailbox (0xFE00_B880) used by
+    // cpu::freq::init_freq() to request SET_CLOCK_RATE from the firmware.
+    #[cfg(feature = "rpi4")]
+    {
+        let peri_block = MBOX_MMIO_BASE & !(BLOCK_2MIB - 1); // 0xFE00_0000
+        l2c[l2_index(peri_block)] = block_device_rw_nx(peri_block);
+    }
 
     // ── 5. L2_B: General RAM → W^X-enforced mapping (dynamic, from linker symbols) ──
     //
@@ -363,6 +389,18 @@ pub unsafe fn build_page_tables() -> usize {
         uart_block_base,
     )
     .ok();
+    #[cfg(feature = "rpi4")]
+    {
+        let peri_block = MBOX_MMIO_BASE & !(BLOCK_2MIB - 1);
+        writeln!(
+            &mut &UART,
+            "[mmu ]   L2_C@ {:#010x}  MBOX idx {:3}  PA {:#010x}  Device-nGnRnE  RW+NX",
+            l2c_pa,
+            l2_index(peri_block),
+            peri_block,
+        )
+        .ok();
+    }
     writeln!(
         &mut &UART,
         "[mmu ]   L2_B@ {:#010x}  DTB    idx {:3}       PA {:#010x}..{:#010x}  Normal-WB  RW+NX",
