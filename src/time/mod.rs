@@ -111,6 +111,28 @@ const PMUSERENR_EN: u64 = 1 << 0;
 // that may have been set by EL3 firmware.
 /// MDCR_EL2 bit 7: Hypervisor PMU Enable.
 const MDCR_EL2_HPME: u64 = 1 << 7;
+/// MDCR_EL2 bit 6: TPM — traps EL0/EL1 PMU counter accesses to EL2.
+/// Must be 0; any `mrs pmccntr_el0` in the HFT hot path would become a
+/// VM exit (~100–200 cycles), destroying latency determinism.
+const MDCR_EL2_TPM: u64 = 1 << 6;
+/// MDCR_EL2 bit 5: TPMCR — traps PMCR_EL0 accesses to EL2.
+/// Must be 0; PMCR_EL0 is written in init_per_core() itself — a trap
+/// here would create an unrecoverable recursive fault path.
+const MDCR_EL2_TPMCR: u64 = 1 << 5;
+/// MDCR_EL2 bit 17: HPMD — Hypervisor PMU Disable.
+/// Controls EL2's *own* PMU event counting (not guest access — that is TPM/TPMCR).
+/// Keep 0: EL2 event counting remains active so PMEVCNTR0_EL0 accumulates correctly.
+/// Clear defensively in case EL3 firmware left it as 1.
+/// Bit 17 — HPMD: Guest Performance Monitors Disable.
+/// (Requires FEAT_SPE/PMUv3p1. Cortex-A72 safely ignores write-to-0 if unimplemented).
+const MDCR_EL2_HPMD: u64 = 1 << 17;
+/// MDCR_EL2 bits[4:0]: HPMN — number of event counters in the first range (accessible from EL1).
+/// Counter indices [0, HPMN-1] are ALLOCATED TO EL1. Counters [HPMN, PMCR.N-1] are EL2-exclusive.
+/// Reset value is PMCR_EL0.N (all counters open to EL1).
+/// If firmware sets HPMN to a lower value, or if we force HPMN=0, guest EL1 accesses to those
+/// counters (e.g. PMEVCNTR0_EL0) will trap to EL2 with EC=0x18, destroying latency determinism.
+/// We must read PMCR_EL0.N and write it into HPMN to guarantee 100% EL1 PMU accessibility.
+const MDCR_EL2_HPMN_MASK: u64 = 0x1F; // mask for bits[4:0] to clear before inserting N
 
 // ── Internal register accessors ──────────────────────────────────────────────
 
@@ -264,15 +286,27 @@ pub fn init_per_core(cpu_id: u8) {
     // Read-modify-write to preserve any debug/trace bits set by EL3 firmware.
     unsafe {
         let mdcr: u64;
+        let pmcr: u64;
         core::arch::asm!(
             "mrs {v}, mdcr_el2",
+            "mrs {p}, pmcr_el0",
             v = out(reg) mdcr,
+            p = out(reg) pmcr,
             options(nostack, nomem),
         );
+
+        let n_counters = (pmcr >> 11) & 0x1F; // extract PMCR_EL0.N
+
         core::arch::asm!(
             "msr mdcr_el2, {v}",
             "isb",
-            v = in(reg) mdcr | MDCR_EL2_HPME,
+            // Explicitly clear TPM, TPMCR, HPMD, and HPMN while setting HPME.
+            // A plain OR risks inheriting TPM=1 from EL3 firmware (traps every
+            // PMU read in the HFT hot path) or a restricted HPMN.
+            // HPMN must equal N to expose all counters to EL1. Writing 0 traps everything!
+            v = in(reg) (mdcr & !(MDCR_EL2_TPM | MDCR_EL2_TPMCR | MDCR_EL2_HPMD | MDCR_EL2_HPMN_MASK))
+                        | MDCR_EL2_HPME
+                        | n_counters,
             options(nostack, nomem),
         );
     }
@@ -355,8 +389,9 @@ pub fn init_per_core(cpu_id: u8) {
 
     writeln!(
         &mut &UART,
-        "[time] CPU {}: CNTFRQ={} Hz  CNTVOFF={:#x}  CNTV_CTL={:#x}  PMCR={:#x}  MDCR_EL2={:#x} (HPME={})",
-        cpu_id, freq_hz, cntvoff, cntv_ctl, pmcr, mdcr, (mdcr >> 7) & 1,
+        "[time] CPU {}: CNTFRQ={} Hz  CNTVOFF={:#x}  CNTV_CTL={:#x}  PMCR={:#x}  MDCR_EL2={:#x} (HPME={} TPM={} TPMCR={} HPMN={})",
+        cpu_id, freq_hz, cntvoff, cntv_ctl, pmcr, mdcr,
+        (mdcr >> 7) & 1, (mdcr >> 6) & 1, (mdcr >> 5) & 1, mdcr & 0x1F,
     )
     .ok();
     writeln!(

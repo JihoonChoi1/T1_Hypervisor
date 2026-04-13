@@ -35,7 +35,7 @@ use core::fmt::Write;
 /// Setting this does NOT activate Stage-2 until VTTBR_EL2 is loaded and
 /// valid; but asserting it early locks in the architectural "virtualised"
 /// operating mode so that system register traps below work correctly.
-const HCR_VM: u64 = 1 << 0;
+pub const HCR_VM: u64 = 1 << 0;
 
 /// Bit 3 — FMO: Route physical FIQ interrupts to EL2, not EL1.
 /// The GIC will route physical FIQs to EL2; after the virtual GIC (vGIC)
@@ -45,7 +45,7 @@ const HCR_VM: u64 = 1 << 0;
 /// HFT-dedicated cores.  Interim setting — the permanent fix is GIC SPI
 /// affinity routing (steer all IRQs/FIQs to management core only).
 /// TODO: replace with GIC per-CPU targeting when irq::gic is implemented.
-const HCR_FMO: u64 = 1 << 3;
+pub const HCR_FMO: u64 = 1 << 3;
 
 /// Bit 4 — IMO: Route physical IRQ interrupts to EL2.
 /// Same rationale as FMO — we intercept and forward to the guest vGIC.
@@ -53,16 +53,16 @@ const HCR_FMO: u64 = 1 << 3;
 /// HFT NOTE: Same caveat as FMO above.  Interim only; GIC affinity routing
 /// is the production fix that zeroes interrupt exposure on HFT cores.
 /// TODO: replace with GIC per-CPU targeting when irq::gic is implemented.
-const HCR_IMO: u64 = 1 << 4;
+pub const HCR_IMO: u64 = 1 << 4;
 
 /// Bit 19 — TSC: Trap SMC instructions to EL2 (Secure Monitor Call).
 /// Prevents a guest from reaching EL3/secure world directly.
-const HCR_TSC: u64 = 1 << 19;
+pub const HCR_TSC: u64 = 1 << 19;
 
 /// Bit 31 — RW: EL1 execution state is AArch64 (not AArch32).
 /// Must be 1 for a 64-bit Linux guest; without it the CPU enters
 /// AArch32 mode after ERET to EL1, causing an immediate crash.
-const HCR_RW: u64 = 1 << 31;
+pub const HCR_RW: u64 = 1 << 31;
 
 /// Bit 34 — E2H: Enable EL2 Host Extensions (VHE).
 /// Intentionally did not set this bit.  VHE collapses EL1 and EL2
@@ -80,9 +80,13 @@ const HCR_RW: u64 = 1 << 31;
 /// Must be called from EL2 only.  Writing HCR_EL2 from any other EL is
 /// UNDEFINED BEHAVIOUR per the ARM Architecture Reference Manual.
 pub fn init_hcr_el2() {
+    // FMO and IMO are intentionally omitted from the boot-time base value.
+    // They are applied per-VM inside enter_vm() (Step 20):
+    //   ManagementVM → hcr | HCR_IMO | HCR_FMO  (IRQ routing for vGIC)
+    //   HftEngineVM  → hcr base only             (interrupt-free polling)
+    // Setting them globally here would route all IRQs/FIQs to EL2 on all
+    // four cores, making HFT cores 1–3 non-interrupt-free.
     let hcr: u64 = HCR_VM       // Stage-2 translation active
-                 | HCR_FMO      // FIQs trapped to EL2
-                 | HCR_IMO      // IRQs trapped to EL2
                  | HCR_TSC      // SMC trapped to EL2
                  | HCR_RW; // Guest runs in AArch64
 
@@ -99,11 +103,33 @@ pub fn init_hcr_el2() {
 
     writeln!(
         &mut &UART,
-        "[cpu ] HCR_EL2 = {:#018x}  (VM|FMO|IMO|TSC|RW)",
+        "[cpu ] HCR_EL2 = {:#018x}  (VM|TSC|RW; FMO|IMO deferred to enter_vm per-VM)",
         hcr
     )
     .ok();
 }
+
+/// Compute the HCR_EL2 value appropriate for a specific VM type.
+///
+/// Base (all VMs): VM | TSC | RW — Stage-2 active, SMC trapped, AArch64 guest.
+/// ManagementVM:   base | IMO | FMO — physical IRQs/FIQs routed to EL2 for vGIC forwarding.
+/// HftEngineVM:    base only — interrupt-free polling; no IRQ routing on HFT cores.
+///
+/// Call this inside `enter_vm()` (VM-Entry (ERET EL2 → EL1)) and write the result to HCR_EL2 via
+/// MSR + ISB before ERET.
+pub const fn hcr_for_vm(vm_type: crate::vm::VmType) -> u64 {
+    let base = HCR_VM | HCR_TSC | HCR_RW;
+    match vm_type {
+        crate::vm::VmType::Management => base | HCR_IMO | HCR_FMO,
+        crate::vm::VmType::HftEngine => base,
+    }
+}
+
+// Compile-time assertions: verify expected values for each VM type.
+// Management: VM(1) | FMO(8) | IMO(16) | TSC(0x80000) | RW(0x80000000) = 0x80080019
+// HftEngine:  VM(1) |                    TSC(0x80000)  | RW(0x80000000) = 0x80080001
+const _: () = assert!(hcr_for_vm(crate::vm::VmType::Management) == 0x80080019u64);
+const _: () = assert!(hcr_for_vm(crate::vm::VmType::HftEngine) == 0x80080001u64);
 
 // ── Readback / Verification ───────────────────────────────────────────────────
 
@@ -139,9 +165,13 @@ pub fn read_hcr_el2() -> u64 {
 // - Bit 20: TTA (Trap Trace Accesses to EL2)
 // - Bit 10: TFP (Trap Floating Point and Advanced SIMD to EL2)
 //
-// We want to write 0 to all these bits to ensure no traps occur.
+// - Bits [13:12], [9:0]: Architectural RES1 bits. MUST be set to 1.
+//
+// Writing 0 to the entire register violates the RES1 policy and can result in
+// UNPREDICTABLE hardware behaviour.
+// We must preserve RES1 (0x33FF) while clearing TFP, TCPAC, and TTA (0).
 
-const CPTR_EL2_NO_TRAPS: u64 = 0;
+const CPTR_EL2_NO_TRAPS: u64 = 0x33FF;
 
 /// Open FP/SIMD access to EL2 and EL1/EL0 by clearing the TFP bit.
 /// Satisfies Layer 1 of the HFT FPU enablement requirement (see block comment above).
@@ -170,7 +200,7 @@ pub fn init_cptr_el2() {
 
     writeln!(
         &mut &UART,
-        "[cpu ] CPTR_EL2 = {:#018x}  (TFP=0: FP/SIMD open to EL1/EL2)",
+        "[cpu ] CPTR_EL2 = {:#018x}  (0x33FF: RES1 preserved, TFP=0 FP/SIMD safely open)",
         cptr
     )
     .ok();

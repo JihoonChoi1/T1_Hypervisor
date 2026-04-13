@@ -12,6 +12,7 @@ mod exception;
 mod irq;
 mod memory;
 mod time;
+mod vm;
 
 // Pull in the assembly routines.
 core::arch::global_asm!(include_str!("boot.s"));
@@ -277,6 +278,14 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
 
     // Safety: PMM fully initialised; boot-time only.
     unsafe { memory::cache_color::run_poc_verification(4) };
+
+    // ── VM Fabric Initialisation ─────────────────────────────────────────────
+    // Create the ManagementVM (id=0, core=0) and HftEngineVM (id=1, core=1)
+    // global descriptors.  stage2_root is 0 until when Stage-2 Translation Tables get built.
+    // VcpuRegs are zeroed — filled by Minimal HFT Payload Loader.
+    //
+    // Safety: PMM and cache coloring fully initialised; single-core boot.
+    unsafe { vm::init_vms() };
 
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 
