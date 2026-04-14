@@ -32,6 +32,9 @@
 //                     Consistent with memory/pmm.rs usage.
 // ============================================================================
 
+pub mod killswitch;
+pub mod watchdog;
+
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;

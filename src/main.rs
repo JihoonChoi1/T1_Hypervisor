@@ -287,6 +287,14 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Safety: PMM and cache coloring fully initialised; single-core boot.
     unsafe { vm::init_vms() };
 
+    // ── Watchdog + Kill Switch Initialisation ────────────────────────────────
+    // Allocate one 4 KiB page each for the WatchdogPage and KillPage.
+    // Returned PAs are used for Stage-2 IPA mapping in Stage-2 Translation Tables.
+    //
+    // Safety: PMM fully initialised; single-core boot.
+    let _watchdog_pa = unsafe { vm::watchdog::init_watchdog() };
+    let _killswitch_pa = unsafe { vm::killswitch::init_killswitch() };
+
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 
     // Management core idle loop — future phases replace this with the
