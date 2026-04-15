@@ -294,6 +294,7 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Safety: PMM fully initialised; single-core boot.
     let _watchdog_pa = unsafe { vm::watchdog::init_watchdog() };
     let _killswitch_pa = unsafe { vm::killswitch::init_killswitch() };
+    let _ipc_pa = unsafe { vm::ipc::init_ipc() };
 
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 

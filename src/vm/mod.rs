@@ -32,6 +32,7 @@
 //                     Consistent with memory/pmm.rs usage.
 // ============================================================================
 
+pub mod ipc;
 pub mod killswitch;
 pub mod watchdog;
 
