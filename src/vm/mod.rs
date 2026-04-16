@@ -34,6 +34,7 @@
 
 pub mod ipc;
 pub mod killswitch;
+pub mod stage2;
 pub mod watchdog;
 
 use core::fmt::Write;
