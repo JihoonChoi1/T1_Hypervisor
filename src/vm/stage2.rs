@@ -239,3 +239,166 @@ pub unsafe fn alloc_stage2_root() -> usize {
 
     pa
 }
+
+// ── Descriptor type bits ───────────────────────────────────────────────────────
+
+/// L1 / L2 TABLE descriptor: bits[1:0] = 0b11.
+/// Points to the next-level translation table.
+/// ARM DDI 0487, search "VMSAv8-64 table descriptor format".
+const DESC_TABLE: u64 = 0b11;
+
+/// L2 BLOCK descriptor: bits[1:0] = 0b01.
+/// Leaf mapping of a 2 MiB region (4 KiB granule, walk starting at L1).
+/// ARM DDI 0487, search "VMSAv8-64 block descriptor format".
+const DESC_BLOCK: u64 = 0b01;
+
+// ── Stage-2 2 MiB block mapping ───────────────────────────────────────────────
+
+/// Map a single 2 MiB IPA→PA block in a Stage-2 two-level walk table.
+///
+/// Walk for T0SZ=32, SL0=01, 4 KiB granule (VTCR_EL2 = 0x80023560):
+///   L1 table (root): indexed by `ipa[31:30]` → 4 entries covering 0–4 GiB.
+///   L2 table:        indexed by `ipa[29:21]` → 512 entries × 2 MiB = 1 GiB.
+///
+/// If the L1 entry for `ipa[31:30]` is zero (no L2 table yet), a new L2
+/// page is allocated from the PMM, zeroed, and a TABLE descriptor is written
+/// into the L1 slot.
+///
+/// # Safety
+/// - `root` must be a valid PMM-allocated, zeroed 4 KiB L1 table page (PA).
+/// - `ipa` and `pa` must be 2 MiB-aligned (`assert!` panics otherwise).
+/// - No concurrent access to the same table entries.
+/// - Stage-1 identity-map must be active (VA=PA) so physical addresses are
+///   valid virtual addresses for pointer writes.
+///
+/// # Barrier
+/// Issues `dsb ishst` after all descriptor writes to ensure visibility to
+/// translation-table-walk hardware on all Cortex-A72 cores (Inner Shareable
+/// domain) before the table is activated via VTTBR_EL2.
+/// Linux KVM uses the same barrier sequence:
+///   torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dsb(ishst)` after stage-2 table writes.
+///
+/// # References
+/// ARM DDI 0487, search "VMSAv8-64 table descriptor format"
+/// ARM DDI 0487, search "VMSAv8-64 block descriptor format"
+/// ARM DDI 0487, search "Stage 2 permissions"
+/// ARM DDI 0487, search "Stage 2 memory type and Cacheability attributes when FWB is disabled"
+/// ARM DDI 0487, search "The Access flag"
+/// torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — Stage-2 block descriptor assembly
+pub unsafe fn stage2_map_2m(root: usize, ipa: usize, pa: usize, prot: S2Prot) {
+    const MB2: usize = 2 * 1024 * 1024;
+    assert!(
+        ipa & (MB2 - 1) == 0,
+        "[s2  ] stage2_map_2m: ipa {:#x} not 2 MiB-aligned",
+        ipa
+    );
+    assert!(
+        pa & (MB2 - 1) == 0,
+        "[s2  ] stage2_map_2m: pa {:#x} not 2 MiB-aligned",
+        pa
+    );
+
+    // ── L1 walk ──────────────────────────────────────────────────────────────
+    // L1 index = ipa[31:30].  With T0SZ=32 the IPA space is exactly 4 GiB,
+    // so the L1 table has 4 entries (indices 0–3).
+    // ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule".
+    let l1_idx = (ipa >> 30) & 0x3;
+    let l1_entry_ptr = (root + l1_idx * 8) as *mut u64;
+
+    // Ensure an L2 table exists for this 1 GiB slot.
+    let l2_pa: usize = unsafe {
+        let existing = l1_entry_ptr.read_volatile();
+        if existing == 0 {
+            // Allocate and zero a fresh L2 table (512 × 8 B = 4 KiB page).
+            let new_l2 = pmm::alloc(0).expect("[s2  ] FATAL: PMM OOM allocating Stage-2 L2 table");
+            write_bytes(new_l2 as *mut u8, 0, pmm::PAGE_SIZE);
+
+            // Write L1 TABLE descriptor.
+            // ARM DDI 0487, search "VMSAv8-64 table descriptor format":
+            //   bits[1:0]   = 0b11 (table)
+            //   bits[47:12] = next-level table PA[47:12]
+            let l1_desc = (new_l2 as u64 & 0x0000_FFFF_FFFF_F000) | DESC_TABLE;
+            l1_entry_ptr.write_volatile(l1_desc);
+
+            new_l2
+        } else {
+            // Extract L2 table PA from existing TABLE descriptor bits[47:12].
+            (existing & 0x0000_FFFF_FFFF_F000) as usize
+        }
+    };
+
+    // ── L2 block write ───────────────────────────────────────────────────────
+    // L2 index = ipa[29:21] (0–511 within the 1 GiB covered by this L2 table).
+    let l2_idx = (ipa >> 21) & 0x1FF;
+    let l2_entry_ptr = (l2_pa + l2_idx * 8) as *mut u64;
+
+    // Build L2 BLOCK descriptor.
+    // ARM DDI 0487, search "VMSAv8-64 block descriptor format":
+    //   bits[1:0]   = 0b01          (block)
+    //   bits[5:2]   = MemAttr[3:0]  (Normal-WB=0b1111 or Device=0b0000)
+    //   bits[7:6]   = S2AP[1:0]     (RO=0b01, RW=0b11)
+    //   bits[9:8]   = SH[1:0]=0b11  (Inner Shareable — fixed)
+    //   bit[10]     = AF=1           (Access Flag pre-set; avoids AF fault)
+    //   bits[47:21] = OA[47:21]      (2 MiB-aligned output address)
+    //   bit[53]     = RES0           (FEAT_XNX not present on ARMv8.0-A)
+    //   bit[54]     = XN             (0 = exec permitted, 1 = execute-never)
+    //
+    // `pa & !0x1F_FFFF` clears bits[20:0], keeping OA in bits[47:21].
+    let oa = (pa as u64) & !0x1F_FFFFu64;
+    let l2_desc = DESC_BLOCK | prot.lower_attr_bits() | oa | prot.xn_bit();
+    unsafe {
+        l2_entry_ptr.write_volatile(l2_desc);
+
+        // DSB ISHST: data synchronisation barrier, stores only, Inner Shareable.
+        // Ensures all descriptor writes above are visible to translation-table-walk
+        // hardware on every Cortex-A72 core before VTTBR_EL2 is activated.
+        // ARM DDI 0487, search "General TLB maintenance requirements":
+        // "Write the new translation table entry, and execute a DSB instruction to ensure
+        // that the new entry is visible."
+        // Linux KVM reference: torvalds/linux, arch/arm64/kvm/hyp/pgtable.c, dsb(ishst).
+        core::arch::asm!("dsb ishst", options(nostack, nomem));
+    }
+}
+
+// ── Stage-2 range mapping (2 MiB steps) ───────────────────────────────────────
+
+/// Map a contiguous IPA→PA range in 2 MiB steps using Stage-2 block descriptors.
+///
+/// Iterates over `size / 2MiB` steps, calling `stage2_map_2m` for each block.
+///
+/// # Panics
+/// Panics if `ipa` or `pa` are not 2 MiB-aligned, or if `size` is not a
+/// multiple of 2 MiB.
+///
+/// # Safety
+/// Same requirements as `stage2_map_2m`: root must be a valid L1 table PA,
+/// Stage-1 identity-map must be active.
+///
+/// # References
+/// ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule"
+pub unsafe fn stage2_map_range(root: usize, ipa: usize, pa: usize, size: usize, prot: S2Prot) {
+    const MB2: usize = 2 * 1024 * 1024;
+
+    assert!(
+        ipa & (MB2 - 1) == 0,
+        "[s2  ] stage2_map_range: ipa {:#x} not 2 MiB-aligned",
+        ipa
+    );
+    assert!(
+        pa & (MB2 - 1) == 0,
+        "[s2  ] stage2_map_range: pa {:#x} not 2 MiB-aligned",
+        pa
+    );
+    assert!(
+        size % MB2 == 0,
+        "[s2  ] stage2_map_range: size {:#x} not a multiple of 2 MiB",
+        size
+    );
+
+    let steps = size / MB2;
+    for i in 0..steps {
+        unsafe {
+            stage2_map_2m(root, ipa + i * MB2, pa + i * MB2, prot);
+        }
+    }
+}
