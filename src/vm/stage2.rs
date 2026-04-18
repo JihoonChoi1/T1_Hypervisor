@@ -244,13 +244,22 @@ pub unsafe fn alloc_stage2_root() -> usize {
 
 /// L1 / L2 TABLE descriptor: bits[1:0] = 0b11.
 /// Points to the next-level translation table.
-/// ARM DDI 0487, search "VMSAv8-64 table descriptor format".
+/// ARM DDI 0487, search "Translation table descriptor formats".
 const DESC_TABLE: u64 = 0b11;
 
 /// L2 BLOCK descriptor: bits[1:0] = 0b01.
 /// Leaf mapping of a 2 MiB region (4 KiB granule, walk starting at L1).
-/// ARM DDI 0487, search "VMSAv8-64 block descriptor format".
+/// ARM DDI 0487, search "Translation table descriptor formats".
 const DESC_BLOCK: u64 = 0b01;
+
+/// L3 PAGE descriptor: bits[1:0] = 0b11.
+///
+/// At L3 the encoding 0b11 means a 4 KiB leaf page, not a table pointer.
+/// The same bit pattern 0b11 at L1/L2 would be a TABLE; the distinction is
+/// purely by level.  Using a separate constant makes call-sites self-documenting.
+///
+/// ARM DDI 0487, search "Translation table descriptor formats":
+const DESC_PAGE: u64 = 0b11;
 
 // ── Stage-2 2 MiB block mapping ───────────────────────────────────────────────
 
@@ -279,8 +288,8 @@ const DESC_BLOCK: u64 = 0b01;
 ///   torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dsb(ishst)` after stage-2 table writes.
 ///
 /// # References
-/// ARM DDI 0487, search "VMSAv8-64 table descriptor format"
-/// ARM DDI 0487, search "VMSAv8-64 block descriptor format"
+/// ARM DDI 0487, search "VMSAv8-64 Table descriptor formats"
+/// ARM DDI 0487, search "VMSAv8-64 Block descriptor and Page descriptor formats"
 /// ARM DDI 0487, search "Stage 2 permissions"
 /// ARM DDI 0487, search "Stage 2 memory type and Cacheability attributes when FWB is disabled"
 /// ARM DDI 0487, search "The Access flag"
@@ -400,5 +409,164 @@ pub unsafe fn stage2_map_range(root: usize, ipa: usize, pa: usize, size: usize, 
         unsafe {
             stage2_map_2m(root, ipa + i * MB2, pa + i * MB2, prot);
         }
+    }
+}
+
+// ── Stage-2 4 KiB page mapping ────────────────────────────────────────────────
+
+/// Map a single 4 KiB IPA→PA page in a Stage-2 three-level walk table.
+///
+/// Walk for T0SZ=32, SL0=01, 4 KiB granule (VTCR_EL2 = 0x80023560):
+///
+/// ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule":
+///   L1 table (root): indexed by `ipa[31:30]` → 4 entries covering 0–4 GiB.
+///   L2 table:        indexed by `ipa[29:21]` → 512 entries × 2 MiB = 1 GiB.
+///   L3 table:        indexed by `ipa[20:12]` → 512 entries × 4 KiB = 2 MiB.
+///
+/// Descriptor type dispatch (ARM DDI 0487, search "Translation table descriptor formats"):
+///   L1 entry bits[1:0] = 0b11 → TABLE (points to L2).
+///   L2 entry bits[1:0] = 0b01 → BLOCK (2 MiB leaf — cannot coexist with 4 KiB
+///                                        mappings in the same 2 MiB region → panic).
+///   L2 entry bits[1:0] = 0b11 → TABLE (points to L3).
+///   L3 entry bits[1:0] = 0b11 → PAGE  (4 KiB leaf — only valid leaf at L3).
+///
+/// # L3 PAGE descriptor bit layout
+/// ARM DDI 0487, search "VMSAv8-64 table descriptor format":
+/// ```text
+///   bits[1:0]   = 0b11         page descriptor (valid + leaf at L3)
+///   bits[5:2]   = MemAttr[3:0] memory type (Normal-WB=0b1111, Device=0b0000)
+///   bits[7:6]   = S2AP[1:0]    stage-2 access permissions
+///   bits[9:8]   = SH[1:0]=0b11 inner shareable (fixed)
+///   bit[10]     = AF=1          access flag pre-set (avoids AF fault on first access)
+///   bits[47:12] = OA[47:12]    4 KiB-aligned output address
+///   bit[53]     = RES0          (FEAT_XNX not present on ARMv8.0-A)
+///   bit[54]     = XN            execute-never
+/// ```
+///
+/// # Panics
+/// Panics if a L2 BLOCK descriptor already exists for the same 2 MiB region —
+/// mixing 2 MiB blocks and 4 KiB pages in the same L2 slot is mutually exclusive in descriptor format.
+///
+/// # Safety
+/// - `root` must be a valid PMM-allocated, zeroed 4 KiB L1 table page (PA).
+/// - `ipa` and `pa` must be 4 KiB-aligned (`assert!` panics otherwise).
+/// - No concurrent access to the same table entries.
+/// - Stage-1 identity-map must be active (VA=PA).
+///
+/// # Barrier
+/// Issues `dsb ishst` after the L3 descriptor write, matching the same
+/// barrier used in `stage2_map_2m`.
+/// Linux KVM reference: torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dsb(ishst)`
+/// after stage-2 table writes.
+///
+/// # References
+/// ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule"
+/// ARM DDI 0487, search "VMSAv8-64 Table descriptor formats"
+/// ARM DDI 0487, search "VMSAv8-64 Block descriptor and Page descriptor formats"
+/// ARM DDI 0487, search "Stage 2 permissions"
+/// ARM DDI 0487, search "Stage 2 memory type and Cacheability attributes when FWB is disabled"
+/// ARM DDI 0487, search "The Access flag"
+/// torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — stage2_map_walker
+pub unsafe fn stage2_map_4k(root: usize, ipa: usize, pa: usize, prot: S2Prot) {
+    const PAGE: usize = 4096;
+    assert!(
+        ipa & (PAGE - 1) == 0,
+        "[s2  ] stage2_map_4k: ipa {:#x} not 4 KiB-aligned",
+        ipa
+    );
+    assert!(
+        pa & (PAGE - 1) == 0,
+        "[s2  ] stage2_map_4k: pa {:#x} not 4 KiB-aligned",
+        pa
+    );
+
+    // ── L1 walk ──────────────────────────────────────────────────────────────
+    // L1 index = ipa[31:30].  T0SZ=32 gives exactly 4 GiB IPA space → 4 L1 entries.
+    // ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule".
+    let l1_idx = (ipa >> 30) & 0x3;
+    let l1_entry_ptr = (root + l1_idx * 8) as *mut u64;
+
+    let l2_pa: usize = unsafe {
+        let existing = l1_entry_ptr.read_volatile();
+        if existing == 0 {
+            // No L2 table yet: allocate one, zero it, write L1 TABLE descriptor.
+            let new_l2 =
+                pmm::alloc(0).expect("[s2  ] FATAL: PMM OOM allocating Stage-2 L2 table (4k)");
+            write_bytes(new_l2 as *mut u8, 0, pmm::PAGE_SIZE);
+
+            // L1 TABLE descriptor: bits[1:0]=0b11, bits[47:12]=L2_PA[47:12].
+            // ARM DDI 0487, search "VMSAv8-64 table descriptor format".
+            let l1_desc = (new_l2 as u64 & 0x0000_FFFF_FFFF_F000) | DESC_TABLE;
+            l1_entry_ptr.write_volatile(l1_desc);
+            new_l2
+        } else {
+            // Reuse existing L2 table: extract PA from bits[47:12].
+            (existing & 0x0000_FFFF_FFFF_F000) as usize
+        }
+    };
+
+    // ── L2 walk ──────────────────────────────────────────────────────────────
+    // L2 index = ipa[29:21] (0–511 within the 1 GiB region covered by this L2).
+    let l2_idx = (ipa >> 21) & 0x1FF;
+    let l2_entry_ptr = (l2_pa + l2_idx * 8) as *mut u64;
+
+    let l3_pa: usize = unsafe {
+        let existing = l2_entry_ptr.read_volatile();
+        let desc_type = existing & 0x3;
+
+        if existing == 0 {
+            // No L3 table yet: allocate one, zero it, write L2 TABLE descriptor.
+            let new_l3 =
+                pmm::alloc(0).expect("[s2  ] FATAL: PMM OOM allocating Stage-2 L3 table (4k)");
+            write_bytes(new_l3 as *mut u8, 0, pmm::PAGE_SIZE);
+
+            // L2 TABLE descriptor: bits[1:0]=0b11, bits[47:12]=L3_PA[47:12].
+            // ARM DDI 0487, search "VMSAv8-64 table descriptor format".
+            let l2_desc = (new_l3 as u64 & 0x0000_FFFF_FFFF_F000) | DESC_TABLE;
+            l2_entry_ptr.write_volatile(l2_desc);
+            new_l3
+        } else if desc_type == DESC_TABLE {
+            // Existing L2 TABLE: reuse the L3 table it points to.
+            (existing & 0x0000_FFFF_FFFF_F000) as usize
+        } else {
+            // desc_type == DESC_BLOCK (0b01) — architecturally forbidden to mix
+            // 2 MiB blocks and 4 KiB pages within the same 2 MiB L2 slot.
+            panic!(
+                "[s2  ] stage2_map_4k: L2 BLOCK exists at ipa {:#x} — \
+                 cannot mix 2 MiB block and 4 KiB page in the same 2 MiB region",
+                ipa
+            );
+        }
+    };
+
+    // ── L3 page write ────────────────────────────────────────────────────────
+    // L3 index = ipa[20:12] (0–511 within the 2 MiB region covered by this L3).
+    // ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule".
+    let l3_idx = (ipa >> 12) & 0x1FF;
+    let l3_entry_ptr = (l3_pa + l3_idx * 8) as *mut u64;
+
+    // Build L3 PAGE descriptor.
+    // ARM DDI 0487, search "VMSAv8-64 Block descriptor and Page descriptor formats":
+    //   bits[1:0]   = 0b11          (page — only valid leaf descriptor at L3)
+    //   bits[5:2]   = MemAttr[3:0]  (Normal-WB=0b1111 or Device=0b0000)
+    //   bits[7:6]   = S2AP[1:0]     (RO=0b01, RW=0b11)
+    //   bits[9:8]   = SH[1:0]=0b11  (Inner Shareable — fixed)
+    //   bit[10]     = AF=1           (Access Flag pre-set; avoids AF fault)
+    //   bits[47:12] = OA[47:12]      (4 KiB-aligned output address)
+    //   bit[53]     = RES0           (FEAT_XNX not present on ARMv8.0-A)
+    //   bit[54]     = XN             (0 = exec permitted, 1 = execute-never)
+    let oa = (pa as u64) & 0x0000_FFFF_FFFF_F000; // PA[47:12]
+    let l3_desc = DESC_PAGE | prot.lower_attr_bits() | oa | prot.xn_bit();
+
+    unsafe {
+        l3_entry_ptr.write_volatile(l3_desc);
+
+        // DSB ISHST: ensure the page descriptor is visible to translation-table-walk
+        // hardware on all cores before VTTBR_EL2 activates this table.
+        // ARM DDI 0487, search "General TLB maintenance requirements":
+        // "Write the new translation table entry, and execute a DSB instruction to ensure
+        // that the new entry is visible."
+        // Linux KVM: torvalds/linux, arch/arm64/kvm/hyp/pgtable.c, dsb(ishst).
+        core::arch::asm!("dsb ishst", options(nostack, nomem));
     }
 }
