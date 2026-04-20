@@ -287,14 +287,25 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Safety: PMM and cache coloring fully initialised; single-core boot.
     unsafe { vm::init_vms() };
 
-    // ── Watchdog + Kill Switch Initialisation ────────────────────────────────
-    // Allocate one 4 KiB page each for the WatchdogPage and KillPage.
-    // Returned PAs are used for Stage-2 IPA mapping in Stage-2 Translation Tables.
+    // ── Watchdog + Kill Switch + IPC Shared Page Allocation ─────────────────
+    // Allocate one 4 KiB page each for the WatchdogPage, KillPage and IpcPage.
+    // Returned PAs feed directly into `vm::stage2::init_stage2` below so the
+    // same physical pages are mapped into both VMs' Stage-2 tables at the
+    // fixed shared IPAs (0x5000_0000 / 0x5000_1000 / 0x5000_2000).
     //
     // Safety: PMM fully initialised; single-core boot.
-    let _watchdog_pa = unsafe { vm::watchdog::init_watchdog() };
-    let _killswitch_pa = unsafe { vm::killswitch::init_killswitch() };
-    let _ipc_pa = unsafe { vm::ipc::init_ipc() };
+    let watchdog_pa = unsafe { vm::watchdog::init_watchdog() };
+    let killswitch_pa = unsafe { vm::killswitch::init_killswitch() };
+    let ipc_pa = unsafe { vm::ipc::init_ipc() };
+
+    // ── Stage-2 Translation Tables (per-VM) ─────────────────────────────────
+    // Build ManagementVM and HftEngineVM Stage-2 page tables and store each
+    // L1 root PA back into its `Vm` descriptor.  VTTBR_EL2 is not yet written
+    // here — enter_vm() (TODO) composes `(vmid << 48) | stage2_root`.
+    //
+    // Safety: PMM, init_vms, and the three shared-page init functions have
+    // all completed.  Single-core boot.
+    unsafe { vm::stage2::init_stage2(watchdog_pa, ipc_pa, killswitch_pa) };
 
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 

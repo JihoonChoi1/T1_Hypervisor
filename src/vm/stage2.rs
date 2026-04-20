@@ -570,3 +570,134 @@ pub unsafe fn stage2_map_4k(root: usize, ipa: usize, pa: usize, prot: S2Prot) {
         core::arch::asm!("dsb ishst", options(nostack, nomem));
     }
 }
+
+// ── init_stage2() — per-VM Stage-2 orchestration ──────────────────
+//
+// Constructs one Stage-2 translation table per VM (ManagementVM, HftEngineVM)
+// and installs its L1 root PA into the matching global `Vm` descriptor.
+// Guest RAM mappings (IPA 0x4000_0000–) are deferred to Guest RAM Allocation.
+//
+// Shared-page IPA layout (fixed contract between both VMs and the host):
+//
+//   IPA 0x5000_0000  →  WatchdogPage   (Mgmt: RO,  HFT: RW — HFT writes heartbeat)
+//   IPA 0x5000_1000  →  IpcPage        (Mgmt: RW,  HFT: RW — lock-free SPSC rings)
+//   IPA 0x5000_2000  →  KillPage       (Mgmt: RW,  HFT: RO — HFT polls kill flag)
+//
+// The three shared pages are single 4 KiB pages,
+// `stage2_map_4k` path is required (a 2 MiB block would expose 511 unrelated
+// physical pages to both guests).
+//
+// MMIO passthrough uses `stage2_map_2m` — peripheral register banks are
+// typically small (≤64 KiB) but the host has no reason to deny access to the
+// rest of the 2 MiB window, and block descriptors consume one L2 slot vs.
+// an entire L3 table.
+
+/// IPA of the watchdog shared page (4 KiB). Same address in both VMs.
+const IPA_WATCHDOG: usize = 0x5000_0000;
+/// IPA of the IPC shared page (4 KiB). Same address in both VMs.
+const IPA_IPC: usize = 0x5000_1000;
+/// IPA of the killswitch shared page (4 KiB). Same address in both VMs.
+const IPA_KILLSWITCH: usize = 0x5000_2000;
+
+/// 2 MiB block containing the guest-visible PL011 UART passthrough.
+///
+/// QEMU virt: PL011 UART0 at PA 0x0900_0000 — already 2 MiB-aligned.
+/// RPi4 BCM2711: PL011 UART0 at PA 0xFE20_1000 — containing 2 MiB block is
+///               0xFE20_0000 (verified: 0xFE20_0000 & 0x1FFFFF == 0).
+///               bcm2711.dtsi: `serial@7e201000` → ARM PA 0xFE20_1000.
+#[cfg(not(feature = "rpi4"))]
+const UART_MMIO_BLOCK: usize = 0x0900_0000;
+#[cfg(feature = "rpi4")]
+const UART_MMIO_BLOCK: usize = 0xFE20_0000;
+
+/// 2 MiB block containing the BCM2711 Ethernet MAC register bank.
+///
+/// GENET MAC base = 0xFD58_0000 (bcm2711.dtsi `ethernet@7d580000`).
+/// 0xFD58_0000 & 0x1FFFFF = 0x180000 ≠ 0 → not 2 MiB aligned.
+/// Containing 2 MiB block = 0xFD40_0000 (maps 0xFD40_0000–0xFD5F_FFFF).
+#[cfg(feature = "rpi4")]
+const RPI4_GENET_MMIO_BLOCK: usize = 0xFD40_0000;
+
+/// Build and install Stage-2 translation tables for both guest VMs.
+///
+/// Call order (from `main.rs` after `vm::init_vms()`):
+///   1. Initialise VTCR_EL2 once.
+///   2. Allocate + populate ManagementVM Stage-2 root; store in `MGMT_VM.stage2_root`.
+///   3. Allocate + populate HftEngineVM Stage-2 root; store in `HFT_VM.stage2_root`.
+///
+/// The three shared-page PAs are supplied by the caller so that the
+/// Mgmt-view (RO/RW/RW) and HFT-view (RW/RW/RO) of the same underlying
+/// physical pages are installed with opposite S2AP values.
+///
+/// # Arguments
+/// * `watchdog_pa`   — PA returned by `vm::watchdog::init_watchdog()`.
+/// * `ipc_pa`        — PA returned by `vm::ipc::init_ipc()`.
+/// * `killswitch_pa` — PA returned by `vm::killswitch::init_killswitch()`.
+///
+/// # Safety
+/// - `pmm::init()`, `vm::init_vms()` and the three shared-page init functions
+///   must have already run.
+/// - Must be called exactly once, on the Management core, before any VM entry.
+/// - No other core may access `MGMT_VM`/`HFT_VM` until this returns.
+///
+/// # Barriers
+/// Each `stage2_map_2m` / `stage2_map_4k` call already issues `dsb ishst`
+/// after its descriptor writes, so the tables are visible to translation-
+/// table-walk hardware before this function returns. No additional ISB is
+/// required here — VTTBR_EL2 is written by `enter_vm()` (TODO), which
+/// performs its own DSB ISH / TLBI / ISB sequence.
+///
+/// # References
+/// ARM DDI 0487, search "VMSAv8-64 translation using the 4KB granule"
+pub unsafe fn init_stage2(watchdog_pa: usize, ipc_pa: usize, killswitch_pa: usize) {
+    // Configure VTCR_EL2 once — shared by both VMs (VTCR is not VM-specific).
+    unsafe { init_vtcr_el2() };
+
+    // ── ManagementVM ──────────────────────────────────────────────────────
+    //   UART passthrough : Mgmt owns the console.
+    //   Watchdog RO      : Mgmt observes HFT heartbeat, never writes it.
+    //   IPC RW           : Mgmt drains h2m channels and publishes m2h messages.
+    //   Killswitch RW    : Mgmt sets halt/emergency flag and reason string.
+    let mgmt_root = unsafe { alloc_stage2_root() };
+    unsafe {
+        stage2_map_2m(mgmt_root, UART_MMIO_BLOCK, UART_MMIO_BLOCK, S2Prot::Device);
+        stage2_map_4k(mgmt_root, IPA_WATCHDOG, watchdog_pa, S2Prot::Ro);
+        stage2_map_4k(mgmt_root, IPA_IPC, ipc_pa, S2Prot::Rw);
+        stage2_map_4k(mgmt_root, IPA_KILLSWITCH, killswitch_pa, S2Prot::Rw);
+        super::mgmt_vm().stage2_root = mgmt_root;
+    }
+    writeln!(
+        &mut &UART,
+        "[s2  ] ManagementVM  stage2_root={:#010x}",
+        mgmt_root
+    )
+    .ok();
+
+    // ── HftEngineVM ───────────────────────────────────────────────────────
+    //   Watchdog RW      : HFT increments heartbeat every trading loop tick.
+    //   IPC RW           : HFT writes to h2m[core_idx] and reads m2h (core 1 only).
+    //   Killswitch RO    : HFT polls flag at loop head; must not forge state.
+    //   GENET (RPi4)     : Polling-mode NIC passthrough; no IRQ routing.
+    let hft_root = unsafe { alloc_stage2_root() };
+    unsafe {
+        stage2_map_4k(hft_root, IPA_WATCHDOG, watchdog_pa, S2Prot::Rw);
+        stage2_map_4k(hft_root, IPA_IPC, ipc_pa, S2Prot::Rw);
+        stage2_map_4k(hft_root, IPA_KILLSWITCH, killswitch_pa, S2Prot::Ro);
+
+        #[cfg(feature = "rpi4")]
+        stage2_map_2m(
+            hft_root,
+            RPI4_GENET_MMIO_BLOCK,
+            RPI4_GENET_MMIO_BLOCK,
+            S2Prot::Device,
+        );
+
+        super::hft_vm().stage2_root = hft_root;
+    }
+    writeln!(
+        &mut &UART,
+        "[s2  ] HftEngineVM   stage2_root={:#010x}",
+        hft_root
+    )
+    .ok();
+}
