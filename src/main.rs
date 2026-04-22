@@ -307,6 +307,42 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // all completed.  Single-core boot.
     unsafe { vm::stage2::init_stage2(watchdog_pa, ipc_pa, killswitch_pa) };
 
+    // ── Guest RAM Allocation (per-VM) ───────────────────────────────────────
+    // Walk each VM's entire IPA window pulling pre-colored pages from the
+    // correct source (HFT: bump-index pool, colors 0–7, 32 768 pages / Mgmt:
+    // PMM color-filter walk, colors 8–15, 16 384 pages) and install Stage-2
+    // L3 PAGE descriptors (S2Prot::Rw, XN=1).  Per-page discipline inside the
+    // allocators: write_bytes(pa, 0, 4096) → DC CIVAC every 64 B line → one
+    // trailing `dsb ish` per allocator.  The `dsb ish` is reads-and-writes
+    // scope (NOT `ishst`) because ARM DDI 0487 — search "DSB" requires
+    // reads-and-writes scope to synchronise cache-maintenance completion;
+    // `stage2_map_4k`'s per-descriptor `dsb ishst` covers stores only.
+    // Without this flush the EL2-cached zeros would never reach DRAM, and
+    // the MMU-off guest's Stage-1 default (Normal Non-cacheable under
+    // HCR_EL2.DC=0) would read stale residue — see vm/ram.rs header comment.
+    //
+    // Call-order precondition: init_stage2 above populated both
+    // stage2_root fields; alloc_hft_ram / alloc_mgmt_ram assert!() on a
+    // non-zero root before writing a single descriptor.
+    //
+    // Safety: pmm::init, cache_color::init_hft_pool, init_vms, and
+    // init_stage2 have all completed.  Single-core boot.
+    unsafe { vm::ram::init_guest_ram() };
+
+    // HFT pool drain verification.  `alloc_hft_ram()` above consumed every
+    // page pre-allocated by `init_hft_pool()` (32 768 pages).  `alloc_mgmt_ram`
+    // runs afterwards but draws from the PMM via the Mgmt-color filter
+    // (`alloc_with_filter`), never touching the HFT bump pool, so this
+    // counter reflects the pool's post-`alloc_hft_ram` state as required.
+    // A non-zero value would indicate either an accounting bug in the bump
+    // index or an early exit from the HFT pass.
+    writeln!(
+        &mut &UART,
+        "[vm  ] HFT pool remaining = {} (expected 0, pool fully drained)",
+        memory::cache_color::hft_pool_remaining(),
+    )
+    .ok();
+
     writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
 
     // Management core idle loop — future phases replace this with the
