@@ -13,15 +13,20 @@
 // separation that the whole coloring scheme relies on.  The per-page L3 PAGE
 // descriptor is the only mapping grain that preserves coloring.
 //
-// CACHE-VISIBILITY DISCIPLINE — the guest enters with MMU off initially
-// (`SCTLR_EL1.M = 0`).  With our boot
-// `HCR_EL2 = 0x80080001` (DC = 0), the ARM defines the Stage-1 output for
-// an MMU-off EL1&0 regime as Normal, Outer Shareable, Inner Non-cacheable,
-// Outer Non-cacheable.  A Non-cacheable read bypasses the inner-shareable
-// cache entirely and reads DRAM directly.  The hypervisor's
-// `write_bytes(pa, 0, 4096)` only dirties the cache — the zero bytes are not
-// yet in DRAM — so a fresh guest would read stale bytes and the "zero before
-// mapping for security" promise would be broken.
+// CACHE-VISIBILITY DISCIPLINE — guest enters with MMU off (`SCTLR_EL1.M = 0`)
+// and we boot with `HCR_EL2 = 0x80080001` (DC = 0).  ARM DDI 0487 D8.2.12.1
+// "Behavior when stage 1 address translation is disabled" (rule RWFZPW) then
+// assigns the following stage-1 output attributes to guest accesses:
+//   • data access                         → Device-nGnRnE
+//   • instruction fetch, SCTLR_EL1.I = 0  → Normal Non-cacheable Outer Shareable
+//   • instruction fetch, SCTLR_EL1.I = 1  → Normal Write-Through  Outer Shareable
+// Stage-2 MemAttr (we use Normal-WB via `S2Prot::Rw`) combines with the
+// stage-1 default per the stage-1/stage-2 combining rules; for Device +
+// Normal the stricter Device wins, so the guest's initial reads bypass the
+// hypervisor's Inner-Shareable cache and hit DRAM directly.  A hypervisor-
+// side `write_bytes(pa, 0, 4096)` therefore only dirties the EL2 cache — the
+// zero bytes are not yet in DRAM — so a fresh guest would read stale bytes
+// and the "zero before mapping for security" promise would be broken.
 //
 // Fix: immediately after each `write_bytes`, clean+invalidate the 4 KiB page
 // to the Point of Coherency with `DC CIVAC`, then close the whole pass with a
@@ -31,8 +36,13 @@
 // boot for 32 768 pages × 64 cache-line ops (Cortex-A72) — boot-time only,
 // no impact on the HFT trading hot path.
 //
-// The implementation covers HftEngineVM only.  ManagementVM RAM is handled by
-// `alloc_mgmt_ram()` (TODO) and reuses the same helper.
+// The module exposes three entry points that share `clean_inval_page_to_poc`
+// and the same post-loop `DSB ISH` discipline; differences between them are
+// limited to the source VM, the page-pool source, and the expected color
+// class:
+//   • `alloc_hft_ram()`   — HftEngineVM  (128 MiB, colors 0–7,  bump-index pool)
+//   • `alloc_mgmt_ram()`  — ManagementVM (64 MiB,  colors 8–15, `alloc_with_filter`)
+//   • `init_guest_ram()`  — orchestrator: HFT first, Mgmt second
 //
 // References (search keywords — document version-independent):
 //   ARM DDI 0487 — search "Stage 2 permissions"
@@ -42,8 +52,13 @@
 //   ARM DDI 0487 — search "DC CIVAC"
 //   ARM DDI 0487 — search "About cache maintenance in AArch64 state"
 //   ARM DDI 0487 — search "DSB" and "General TLB maintenance requirements"
-//   ARM DDI 0601 — search "HCR_EL2" (Stage-1 output type when DC = 0 and
-//                                       SCTLR_EL1.M = 0)
+//   ARM DDI 0487 — search "The effects of disabling an address translation stage"
+//     (rule RWFZPW — with HCR_EL2.DC = 0 and SCTLR_EL1.M = 0,
+//      stage-1 default is Device-nGnRnE for data accesses and Normal
+//      Outer-Shareable for instruction fetches; both bypass the
+//      Inner-Shareable cache relative to the hypervisor's recent stores.)
+//   ARM DDI 0487 — search "HCR_EL2" (DC bit: when 1, overrides the stage-1
+//      default to Normal Inner/Outer WB Non-shareable — we do NOT use this.)
 //   torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dcache_clean_inval_poc`
 //     called before Stage-2 PTE install for cacheable mappings.
 //   torvalds/linux, arch/arm64/kvm/mmu.c         — user_mem_abort / Stage-2 RW default.
@@ -58,8 +73,8 @@ use core::ptr::write_bytes;
 use crate::memory::cache_color;
 use crate::memory::pmm::PAGE_SIZE;
 use crate::uart::UART;
-use crate::vm::hft_vm;
 use crate::vm::stage2::{S2Prot, stage2_map_4k};
+use crate::vm::{hft_vm, mgmt_vm};
 
 // ── Cache maintenance helper ──────────────────────────────────────────────────
 
@@ -242,4 +257,142 @@ pub unsafe fn alloc_hft_ram() {
         (cache_color::NUM_COLORS / 2) - 1,
     )
     .ok();
+}
+
+/// Allocate and Stage-2-map all guest RAM for the ManagementVM.
+///
+/// Mirrors `alloc_hft_ram` page-for-page.  Only three things differ:
+///
+/// 1. The source VM is `mgmt_vm()` (`ipa_size = 64 MiB`, 16 384 pages).
+/// 2. The page source is `cache_color::alloc_mgmt_page()` — a PMM filter walk
+///    over colors `NUM_COLORS / 2 .. NUM_COLORS` (= 8..16).  Unlike the HFT
+///    bump-index pool (O(1) per page), this is O(free blocks) per call, but
+///    it only runs once at boot and the Mgmt budget is only 16 384 pages, so
+///    the cost is bounded and off the trading hot path.
+/// 3. The defence-in-depth color check flips sign: the allocator must hand us
+///    pages in the Mgmt color class (`>= NUM_COLORS / 2`).  The literal bound
+///    `8` is *not* hard-coded here — the `NUM_COLORS / 2` symbol keeps
+///    `alloc_hft_ram` (`< NUM_COLORS / 2`) and this function
+///    (`>= NUM_COLORS / 2`) in lock-step if the
+///    color count is ever retuned for a different L2 geometry.
+///
+/// Every other consideration — the MMU-off cache-visibility trap under
+/// `HCR_EL2.DC = 0`, the `DC CIVAC` + post-loop `DSB ISH` batching, the
+/// Stage-1 identity-map requirement for the zero-write operand, the reason
+/// `ishst` is insufficient here — is discussed in depth on `alloc_hft_ram`;
+/// see that function's documentation.
+///
+/// # Call-order invariant
+/// `init_stage2()` must have populated `mgmt_vm().stage2_root`.  A zero root
+/// would redirect every `stage2_map_4k` descriptor write into physical page 0
+/// and silently corrupt whatever lives there; the `assert!` at the top traps
+/// that mistake before any damage is done.
+///
+/// # UART log
+/// ```text
+/// [vm  ] Mgmt RAM: IPA=0x40000000 first_PA=0x........ (64 MiB, 16384 pages, colors 8-15)
+/// ```
+///
+/// # Safety
+/// - `pmm::init()`, `cache_color::init_hft_pool()`, `vm::init_vms()`, and
+///   `vm::stage2::init_stage2()` must all have completed.
+/// - Must be called exactly once, from the Management core (CPU 0), before
+///   any VM entry.  Single-core boot — no concurrent access to `MGMT_VM` or
+///   the PMM free lists.
+pub unsafe fn alloc_mgmt_ram() {
+    let vm = unsafe { mgmt_vm() };
+
+    // Call-order guard: `init_stage2()` must have run so that
+    // `stage2_map_4k(root, ...)` writes descriptors into the correct L1 root.
+    // See alloc_hft_ram for the full rationale; the failure mode is identical.
+    assert!(
+        vm.stage2_root != 0,
+        "[vm  ] alloc_mgmt_ram: stage2_root=0 — init_stage2() must run first"
+    );
+
+    let root = vm.stage2_root;
+    let ipa_base = vm.ipa_base;
+    let num_pages = vm.ipa_size / PAGE_SIZE;
+
+    // Snapshot the first PA for the boot log.  Not used for mapping decisions.
+    let mut first_pa: usize = 0;
+
+    for i in 0..num_pages {
+        let pa = unsafe { cache_color::alloc_mgmt_page() }
+            .expect("[vm  ] alloc_mgmt_ram: PMM exhausted of Management-colored pages");
+
+        if i == 0 {
+            first_pa = pa;
+        }
+
+        // Mgmt color range is colors NUM_COLORS/2 .. NUM_COLORS (= 8..16).
+        debug_assert!(
+            cache_color::color_of(pa) >= (cache_color::NUM_COLORS / 2) as u8,
+            "[vm  ] alloc_mgmt_ram: allocator returned non-Mgmt color page PA={:#010x} color={}",
+            pa,
+            cache_color::color_of(pa),
+        );
+
+        // SAFETY: `pa` is a freshly-allocated, page-aligned physical page
+        // owned by this allocator; no other CPU touches it during boot.
+        unsafe {
+            write_bytes(pa as *mut u8, 0, PAGE_SIZE);
+            // Push the zeros out of the inner-shareable cache down to DRAM so
+            // an MMU-off guest read (Normal Non-cacheable under HCR_EL2.DC=0)
+            // observes the zeros rather than stale bytes.  The batched
+            // `dsb ish` after the loop synchronises all DC CIVAC ops.
+            clean_inval_page_to_poc(pa);
+        }
+
+        // SAFETY: `root` is a PMM-allocated zeroed L1 table PA returned by
+        // `alloc_stage2_root()`; ipa/pa are both 4 KiB-aligned by construction.
+        unsafe {
+            stage2_map_4k(root, ipa_base + i * PAGE_SIZE, pa, S2Prot::Rw);
+        }
+    }
+
+    // Drain every `DC CIVAC` issued above.  Must be `dsb ish` (reads-and-
+    // writes scope), not `dsb ishst` — ARM DDI 0487 "DSB" requires a DSB of
+    // reads-and-writes scope to synchronise cache-maintenance instructions.
+    // The `dsb ishst` inside `stage2_map_4k` covers descriptor stores only.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+    }
+
+    writeln!(
+        &mut &UART,
+        "[vm  ] Mgmt RAM: IPA={:#010x} first_PA={:#010x} ({} MiB, {} pages, colors {}-{})",
+        ipa_base,
+        first_pa,
+        (num_pages * PAGE_SIZE) / (1024 * 1024),
+        num_pages,
+        cache_color::NUM_COLORS / 2,
+        cache_color::NUM_COLORS - 1,
+    )
+    .ok();
+}
+
+/// Two-phase guest-RAM orchestrator for the whole hypervisor.
+///
+/// Runs `alloc_hft_ram()` first, then `alloc_mgmt_ram()`.  Both functions
+/// are self-contained with respect to cache-maintenance completion (each
+/// closes with its own `DSB ISH`), so `init_guest_ram` itself adds no
+/// barriers.
+///
+/// Ordering rationale: `init_hft_pool()` has already drained every HFT-
+/// colored page out of the PMM and into the pre-carved bump array, so the
+/// Mgmt allocator cannot contend with the HFT pool in either order.  The
+/// HFT-first sequence is chosen purely to match the project-wide
+/// HFT-priority convention (establish the trading VM's state first, then
+/// stand up Management).
+///
+/// # Safety
+/// All preconditions of `alloc_hft_ram()` and `alloc_mgmt_ram()` must hold.
+/// Must be called exactly once from the Management core (CPU 0) before any
+/// VM entry.
+pub unsafe fn init_guest_ram() {
+    unsafe {
+        alloc_hft_ram();
+        alloc_mgmt_ram();
+    }
 }
