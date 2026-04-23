@@ -1,0 +1,28 @@
+# ============================================================================
+# payload/.cargo/config.toml — sub-crate build config
+#
+# target:    aarch64-unknown-none (same as main kernel; edition 2024 no_std).
+# rustflags: single `-T linker.ld` so the binary lays out at 0x4000_0000.
+#
+# NOTE ON MERGING vs RUSTFLAGS env var:
+#   Cargo walks parent directories for `.cargo/config.toml` files and
+#   CONCATENATES array-valued keys such as `target.<triple>.rustflags`.
+#   The repo root's `.cargo/config.toml` carries
+#       rustflags = ["-C", "link-arg=-Tsrc/linker.ld"]
+#   which would otherwise be appended onto our rustflags below, pushing
+#   TWO `-T` scripts onto the linker command line.  `build.sh` exports
+#   RUSTFLAGS to short-circuit this — per the Cargo reference
+#   (target.<triple>.rustflags precedence), the RUSTFLAGS env var sits
+#   above target-rustflags in precedence and replaces them entirely.
+#
+#   The rustflags value below is kept for `cargo rustc --explain`-style
+#   introspection and for the case where somebody invokes cargo from a
+#   shell without the repo-root config in scope.  For reliable builds,
+#   always go through `build.sh`.
+# ============================================================================
+
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = ["-C", "link-arg=-Tlinker.ld"]

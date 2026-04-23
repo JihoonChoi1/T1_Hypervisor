@@ -1,0 +1,36 @@
+# ============================================================================
+# payload/Cargo.toml — minimal HFT guest payload (sub-crate)
+#
+# Standalone bare-metal AArch64 crate built ahead of the main hypervisor.
+# The main kernel never depends on this Cargo.toml; it only consumes the
+# pre-built `payload/hft_payload.bin` via `include_bytes!` in later implementation.
+#
+# Explicit [workspace] table makes this crate its own workspace root and
+# guarantees it is never absorbed into the main kernel's package at
+# repo root (which has no [workspace] declaration).  Ensures
+# `payload/target/` is used — the main kernel's `target/` stays untouched.
+# ============================================================================
+
+[package]
+name = "hft_payload"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "hft_payload"
+test = false
+
+# Release profile mirrors the main kernel's discipline: no unwinding, no
+# debug info in the stripped binary, full LTO, single codegen unit.
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+# Explicit empty workspace — prevents auto-absorption into any ancestor
+# Cargo.toml.  The main kernel at repo root has no [workspace] of its own,
+# so without this line cargo's workspace-root search would walk up and
+# potentially emit a "current package is not a member" warning.
+[workspace]
