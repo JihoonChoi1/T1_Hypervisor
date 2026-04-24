@@ -1,4 +1,5 @@
 /target
+payload/target/
 .DS_Store
 /docs
 /tmp

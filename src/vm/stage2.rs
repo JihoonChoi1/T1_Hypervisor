@@ -571,6 +571,107 @@ pub unsafe fn stage2_map_4k(root: usize, ipa: usize, pa: usize, prot: S2Prot) {
     }
 }
 
+// ── Stage-2 IPA → host PA walk (read-only lookup) ─────────────────────────────
+
+/// Walk a Stage-2 translation table rooted at `root` and resolve `ipa` to its
+/// backing host PA.  Returns `None` if any intermediate descriptor is
+/// unmapped (bits[1:0] = 0b00) or the walk reaches an architecturally-invalid
+/// encoding.
+///
+/// Walk geometry matches `stage2_map_2m` / `stage2_map_4k`
+/// (VTCR_EL2 = 0x80023560 → T0SZ=32, SL0=0b01, 4 KiB granule):
+///
+///   L1 (root) : indexed by `ipa[31:30]` — 4 entries, always TABLE (set by us).
+///   L2        : indexed by `ipa[29:21]` — either BLOCK (2 MiB leaf) or TABLE.
+///   L3        : indexed by `ipa[20:12]` — PAGE (4 KiB leaf) only valid leaf.
+///
+/// Descriptor discrimination uses the low 2 bits.  ARM DDI 0487 —
+/// search "Translation table descriptor formats":
+///   0b00 → INVALID (entire descriptor treated as unmapped)
+///   0b01 → BLOCK at L1/L2; RESERVED at L3
+///   0b11 → TABLE at L1/L2; PAGE at L3
+///
+/// Output-address extraction follows the same mask KVM uses — see
+/// Linux kernel, `arch/arm64/include/asm/kvm_pgtable.h` — `KVM_PTE_ADDR_MASK`
+/// (= `GENMASK(47, PAGE_SHIFT)`) consumed by
+/// Linux kernel, `arch/arm64/include/asm/kvm_pgtable.h` — `kvm_pte_to_phys`.
+/// A 2 MiB BLOCK descriptor has bits[20:12] RES0, so we mask bits[47:21] and
+/// OR in `ipa[20:0]` to recover the full PA (ARM DDI 0487 — search
+/// "VMSAv8-64 Block descriptor and Page descriptor formats").
+///
+/// # Returns
+/// `Some(pa)` for a fully-resolved leaf, `None` for any unmapped/invalid entry.
+///
+/// # Safety
+/// - `root` must be the PA of a live Stage-2 L1 table built by
+///   `alloc_stage2_root` + `stage2_map_*` on this VM.
+/// - Stage-1 identity-map must be active so `root` and any descended table
+///   PA are also valid virtual addresses for the descriptor loads below.
+/// - Caller must serialise this walk against concurrent `stage2_map_*`
+///   writers on the same table.  `init_stage2` + `init_guest_ram` publish
+///   their descriptors with `dsb ish{st}`, so post-boot callers observe a
+///   fully-settled table without issuing their own barrier here.
+///
+/// # Barriers
+/// No DSB/ISB is issued — this is a pure read helper.  `read_volatile`
+/// mirrors the `write_volatile` semantics used by `stage2_map_2m` /
+/// `stage2_map_4k` so the compiler does not fold or hoist these loads.
+///
+/// # References
+/// ARM DDI 0487 — search "VMSAv8-64 translation using the 4KB granule"
+/// ARM DDI 0487 — search "VMSAv8-64 Block descriptor and Page descriptor formats"
+/// ARM DDI 0487 — search "Translation table descriptor formats"
+/// Linux kernel, `arch/arm64/include/asm/kvm_pgtable.h` — `KVM_PTE_ADDR_MASK`
+/// Linux kernel, `arch/arm64/include/asm/kvm_pgtable.h` — `kvm_pte_to_phys`
+pub unsafe fn walk_ipa(root: usize, ipa: usize) -> Option<usize> {
+    // ── L1 walk ──────────────────────────────────────────────────────────────
+    // L1 index = ipa[31:30] (4 entries covering 4 GiB, SL0=01 + T0SZ=32).
+    let l1_idx = (ipa >> 30) & 0x3;
+    let l1_entry = unsafe { ((root + l1_idx * 8) as *const u64).read_volatile() };
+    if l1_entry == 0 {
+        return None;
+    }
+    // In this hypervisor L1 entries are only ever written as TABLE descriptors
+    // (see `stage2_map_2m` / `stage2_map_4k`).  Extract the next-level table
+    // PA from bits[47:12] — same mask pattern as Linux's `KVM_PTE_ADDR_MASK`.
+    let l2_pa = (l1_entry & 0x0000_FFFF_FFFF_F000) as usize;
+
+    // ── L2 walk ──────────────────────────────────────────────────────────────
+    // L2 index = ipa[29:21] (0..511 within the 1 GiB covered by this L2 table).
+    let l2_idx = (ipa >> 21) & 0x1FF;
+    let l2_entry = unsafe { ((l2_pa + l2_idx * 8) as *const u64).read_volatile() };
+    match l2_entry & 0x3 {
+        // INVALID — unmapped slot.
+        0b00 => None,
+
+        // BLOCK — 2 MiB leaf.  OA in bits[47:21]; bits[20:12] are RES0 in a
+        // well-formed block descriptor.  Offset within the block is ipa[20:0].
+        0b01 => {
+            let oa = (l2_entry & 0x0000_FFFF_FFE0_0000) as usize;
+            Some(oa | (ipa & 0x1F_FFFF))
+        }
+
+        // TABLE — descend to L3.
+        0b11 => {
+            let l3_pa = (l2_entry & 0x0000_FFFF_FFFF_F000) as usize;
+            let l3_idx = (ipa >> 12) & 0x1FF;
+            let l3_entry = unsafe { ((l3_pa + l3_idx * 8) as *const u64).read_volatile() };
+            if l3_entry & 0x3 == 0b11 {
+                // PAGE — 4 KiB leaf.  Offset within page is ipa[11:0].
+                let oa = (l3_entry & 0x0000_FFFF_FFFF_F000) as usize;
+                Some(oa | (ipa & 0xFFF))
+            } else {
+                // INVALID (0b00) or architecturally reserved at L3.
+                None
+            }
+        }
+
+        // 0b10 is architecturally reserved across all levels (ARM DDI 0487 —
+        // search "Translation table descriptor formats").  Treat as unmapped.
+        _ => None,
+    }
+}
+
 // ── init_stage2() — per-VM Stage-2 orchestration ──────────────────
 //
 // Constructs one Stage-2 translation table per VM (ManagementVM, HftEngineVM)

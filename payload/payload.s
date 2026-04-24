@@ -39,7 +39,7 @@
 // sends the fault to IPA 0 which is unmapped and will vector straight
 // back to EL2 as a Stage-2 abort.
 //
-// ── Shared-page layout (fixed IPAs, see src/vm/{watchdog,killswitch}.rs) ─
+// ── Shared-page layout (fixed IPAs, see src/vm/watchdog.rs and killswitch.rs) ─
 //   0x5000_0000  WatchdogPage    — offset 0  : heartbeat   (u64 LDR/STR)
 //                                   S2AP=RW for HftEngineVM, RO for Mgmt.
 //   0x5000_2000  KillPage        — offset 0  : flag        (u8)
