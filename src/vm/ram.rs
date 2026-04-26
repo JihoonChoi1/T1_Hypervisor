@@ -96,6 +96,11 @@ const CACHE_LINE: usize = 64;
 /// (Normal Non-cacheable) therefore observes the zeros rather than stale
 /// DRAM residue from whatever tenant previously held this physical frame.
 ///
+/// Visibility is `pub(crate)` so `vm::loader::load_hft_payload` can share the
+/// same cache-maintenance contract when copying the payload image into guest
+/// RAM (one helper, one batching convention — callers close with a single
+/// `dsb ish` after their own per-page loop).  No other module should call it.
+///
 /// # Safety
 /// - `pa` must be 4 KiB-aligned.
 /// - `pa` must be identity-mapped in Stage-1 as Normal-WB so the VA `pa` is a
@@ -108,7 +113,7 @@ const CACHE_LINE: usize = 64;
 /// ARM DDI 0487 — search "About cache maintenance in AArch64 state"
 /// torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dcache_clean_inval_poc`
 #[inline]
-unsafe fn clean_inval_page_to_poc(pa: usize) {
+pub(crate) unsafe fn clean_inval_page_to_poc(pa: usize) {
     let mut off = 0;
     while off < PAGE_SIZE {
         unsafe {

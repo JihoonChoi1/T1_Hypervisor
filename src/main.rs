@@ -329,6 +329,22 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // init_stage2 have all completed.  Single-core boot.
     unsafe { vm::ram::init_guest_ram() };
 
+    // ── HFT Payload Load ────────────────────────────────────────────────────
+    // Copy the pre-built `payload/hft_payload.bin` image into the HFT VM's
+    // guest RAM (IPA base 0x4000_0000) and seed vcpu[0].regs so that a future
+    // VM-Entry step can ERET into it at EL1.  No VM entry happens here —
+    // this call is byte-copy + register seed only.
+    //
+    // Cache-visibility: the loader reuses `clean_inval_page_to_poc` + a
+    // single trailing `dsb ish` (reads-and-writes scope, per ARM DDI 0487 —
+    // search "DSB"), mirroring init_guest_ram's contract so the bytes reach
+    // DRAM before the MMU-off guest's first instruction fetch (Normal
+    // Non-cacheable, bypasses the EL2 cache under HCR_EL2.DC=0).
+    //
+    // Safety: init_vms, init_stage2, and init_guest_ram have all completed;
+    // single-core boot.
+    unsafe { vm::loader::load_hft_payload() };
+
     // HFT pool drain verification.  `alloc_hft_ram()` above consumed every
     // page pre-allocated by `init_hft_pool()` (32 768 pages).  `alloc_mgmt_ram`
     // runs afterwards but draws from the PMM via the Mgmt-color filter
