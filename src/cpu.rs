@@ -11,7 +11,8 @@
 //   2. cpu::init_cptr_el2()   — open FP/SIMD to EL2 and EL1 guests
 //   3. cpu::init_sctlr_el2()  — CPU control defaults before MMU on
 //   4. cpu::init_mair_el2()   — memory attribute slots for page tables
-//   MMU activation (TCR/TTBR/SCTLR.M) belongs to a future MMU module
+//   MMU activation (TCR/TTBR/SCTLR.M) is done later by memory::stage1
+//   (build_page_tables + enable_mmu).
 // ============================================================================
 
 /// CPU frequency pinning: VideoCore mailbox SET_CLOCK_RATE (QEMU no-op).
@@ -38,21 +39,22 @@ use core::fmt::Write;
 pub const HCR_VM: u64 = 1 << 0;
 
 /// Bit 3 — FMO: Route physical FIQ interrupts to EL2, not EL1.
-/// The GIC will route physical FIQs to EL2; after the virtual GIC (vGIC)
-/// is wired we forward them as vFIQs to the guest.
+/// When set, physical FIQs trap to EL2; once a virtual GIC (vGIC) exists the
+/// hypervisor forwards them to the guest as vFIQs (vGIC is still future work).
 ///
-/// HFT NOTE: This blanket-routes ALL FIQs to EL2, including those on
-/// HFT-dedicated cores.  Interim setting — the permanent fix is GIC SPI
-/// affinity routing (steer all IRQs/FIQs to management core only).
-/// TODO: replace with GIC per-CPU targeting when irq::gic is implemented.
+/// HFT ISOLATION: FMO is deliberately NOT set in the boot-time HCR_EL2 base.
+/// It is applied per-VM in `hcr_for_vm()` — ManagementVM only — so HFT cores
+/// 1–3 never trap FIQs to EL2 and stay interrupt-free.  This works together
+/// with GIC SPI steering (all SPIs targeted at CPU 0 in `irq::gic`), so no
+/// peripheral interrupt ever reaches an HFT core.
 pub const HCR_FMO: u64 = 1 << 3;
 
 /// Bit 4 — IMO: Route physical IRQ interrupts to EL2.
-/// Same rationale as FMO — we intercept and forward to the guest vGIC.
+/// IRQ counterpart of FMO — when set, physical IRQs trap to EL2 for vGIC
+/// forwarding to the guest.
 ///
-/// HFT NOTE: Same caveat as FMO above.  Interim only; GIC affinity routing
-/// is the production fix that zeroes interrupt exposure on HFT cores.
-/// TODO: replace with GIC per-CPU targeting when irq::gic is implemented.
+/// HFT ISOLATION: like FMO, IMO is NOT in the boot-time base; it is applied
+/// per-VM in `hcr_for_vm()` (ManagementVM only).  See the FMO note above.
 pub const HCR_IMO: u64 = 1 << 4;
 
 /// Bit 19 — TSC: Trap SMC instructions to EL2 (Secure Monitor Call).
@@ -81,7 +83,7 @@ pub const HCR_RW: u64 = 1 << 31;
 /// UNDEFINED BEHAVIOUR per the ARM Architecture Reference Manual.
 pub fn init_hcr_el2() {
     // FMO and IMO are intentionally omitted from the boot-time base value.
-    // They are applied per-VM inside enter_vm() (Step 20):
+    // They are applied per-VM inside enter_vm():
     //   ManagementVM → hcr | HCR_IMO | HCR_FMO  (IRQ routing for vGIC)
     //   HftEngineVM  → hcr base only             (interrupt-free polling)
     // Setting them globally here would route all IRQs/FIQs to EL2 on all
@@ -208,7 +210,7 @@ pub fn init_cptr_el2() {
 
 // ── SCTLR_EL2 bit positions (ARM DDI 0487, search 'SCTLR_EL2') ──────────────
 // Pre-MMU baseline: we write a clean, deterministic value before the MMU is
-// enabled (TODO).  When enable_mmu() runs it only needs to flip bit 0.
+// enabled.  When memory::stage1::enable_mmu() runs it only needs to flip bit 0.
 
 /// Bit 0 — M: MMU enable. Left 0 here; Will be set by `memory::stage1::enable_mmu()`.
 /// Bit 2 — C: Data cache enable. Left 0 until page tables are coherent.
@@ -240,7 +242,7 @@ pub const SCTLR_EL2_RES1: u64 = 0x30C5_0830;
 /// The only active feature we enable here is stack alignment checking (SA)
 /// so that a misaligned hypervisor stack is caught immediately rather than
 /// silently corrupting data.  MMU / cache bits are left 0 and will be set
-/// by `memory::stage1::enable_mmu()` (TODO).
+/// by `memory::stage1::enable_mmu()`.
 ///
 /// # Safety
 /// Must be called from EL2 only.
@@ -298,12 +300,12 @@ const MAIR_ATTR0_NORMAL_WB: u64 = 0xFF << 0;
 const MAIR_ATTR1_DEVICE_NGNRNE: u64 = 0x00 << 8;
 
 /// Initialise MAIR_EL2 with the two memory attribute slots used by our
-/// Stage-1 page tables (TODO).
+/// Stage-1 page tables (memory::stage1).
 ///
 /// **Slot 0 (AttrIdx=0):** Normal WB-Cached — RAM, HFT pages.
 /// **Slot 1 (AttrIdx=1):** Device-nGnRnE  — UART, NIC MMIO.
 ///
-/// Must be called before building Stage-1 page tables (TODO)
+/// Must be called before building Stage-1 page tables (memory::stage1)
 /// so that AttrIdx fields in page table descriptors have a defined meaning
 /// when the MMU is activated.
 ///
