@@ -219,6 +219,22 @@ pub fn init_cptr_el2() {
 /// our AArch64 target; setting it wrongly corrupts every register read).
 const SCTLR_SA: u64 = 1 << 3;
 
+/// SCTLR_EL2 (E2H=0) RES1 bits: {4, 5, 11, 16, 18, 22, 23, 28, 29} = 0x30C5_0830.
+///
+/// Per ARM DDI 0487 (SCTLR_EL2, "search 'SCTLR_EL2'") each of these fields is
+/// defined only "When ELIsInHost(EL2)" (i.e. HCR_EL2.E2H==1) or under a feature
+/// this core lacks (FEAT_ExS → EOS/EIS, FEAT_LSMAOC → nTLSMD/LSMAOE); otherwise
+/// it is "Reserved, RES1".  Cortex-A72 is ARMv8.0 with no FEAT_VHE, so E2H is
+/// permanently 0 and these fields are permanently RES1.  Writing 0 to a RES1
+/// field is architecturally CONSTRAINED UNPREDICTABLE, so we OR them in to keep
+/// the write well-formed — matching TF-A `SCTLR_EL2_RES1` and Linux/u-boot.
+///
+/// `pub` so the MMU-enable path (`memory::stage1::enable_mmu` /
+/// `enable_mmu_secondary`), which also writes SCTLR_EL2 from scratch, ORs in
+/// the same mask — otherwise the RES1 bits set here would be dropped again the
+/// moment the MMU is enabled.
+pub const SCTLR_EL2_RES1: u64 = 0x30C5_0830;
+
 /// Write a safe, deterministic pre-MMU baseline to SCTLR_EL2.
 ///
 /// The only active feature we enable here is stack alignment checking (SA)
@@ -230,8 +246,10 @@ const SCTLR_SA: u64 = 1 << 3;
 /// Must be called from EL2 only.
 pub fn init_sctlr_el2() {
     // Write the entire register from scratch — never trust reset values.
-    // EE=0 (little-endian) is guaranteed by leaving it unset.
-    let sctlr: u64 = SCTLR_SA; // SA=1, everything else safe-zero
+    // RES1 bits are included (SCTLR_EL2_RES1) so the write is architecturally
+    // well-formed; the only functional bit we assert is SA.  M/C/I stay 0 until
+    // enable_mmu(); EE=0 (little-endian) is guaranteed by leaving it unset.
+    let sctlr: u64 = SCTLR_SA | SCTLR_EL2_RES1; // 0x30C50838
 
     unsafe {
         core::arch::asm!(
@@ -244,7 +262,7 @@ pub fn init_sctlr_el2() {
 
     writeln!(
         &mut &UART,
-        "[cpu ] SCTLR_EL2 = {:#018x}  (SA=1, MMU/cache off, LE)",
+        "[cpu ] SCTLR_EL2 = {:#018x}  (SA=1 + RES1, MMU/cache off, LE)",
         sctlr
     )
     .ok();

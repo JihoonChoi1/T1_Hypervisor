@@ -497,7 +497,10 @@ pub unsafe fn enable_mmu(l1_pa: usize) {
     const SCTLR_SA: u64 = 1 << 3;
     const SCTLR_I: u64 = 1 << 12;
     const SCTLR_WXN: u64 = 1 << 19;
-    let sctlr: u64 = SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN;
+    // SCTLR_EL2 (E2H=0) RES1 bits — written from scratch means we must include
+    // them, else the MMU-enable write drops the RES1 bits set by init_sctlr_el2.
+    let sctlr: u64 =
+        SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN | crate::cpu::SCTLR_EL2_RES1;
 
     // ── Barrier-sequenced activation ─────────────────────────────────────────
     //  References: Learn the architecture - AArch64 memory management Guide
@@ -569,13 +572,14 @@ pub unsafe fn enable_mmu_secondary() {
         | (0b00 << 14)   // TG0   = 4 KiB granule
         | (0b010 << 16); // PS    = 40-bit PA
 
-    // Same SCTLR_EL2 as CPU 0: MMU + D-cache + I-cache + SA + WXN.
+    // Same SCTLR_EL2 as CPU 0: MMU + D-cache + I-cache + SA + WXN + RES1.
     const SCTLR_M: u64 = 1 << 0;
     const SCTLR_C: u64 = 1 << 2;
     const SCTLR_SA: u64 = 1 << 3;
     const SCTLR_I: u64 = 1 << 12;
     const SCTLR_WXN: u64 = 1 << 19;
-    let sctlr: u64 = SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN;
+    let sctlr: u64 =
+        SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I | SCTLR_WXN | crate::cpu::SCTLR_EL2_RES1;
 
     // PSCI firmware may leave stale EL2 TLB entries on secondary cores.
     // Invalidate before loading our page tables to prevent stale translations.
