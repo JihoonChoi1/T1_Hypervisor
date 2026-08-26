@@ -187,6 +187,27 @@ const _: () = assert!(core::mem::size_of::<VcpuFpRegs>() == 528);
 const _: () = assert!(core::mem::size_of::<VcpuSysRegs>() == 120);
 const _: () = assert!(core::mem::size_of::<VcpuRegs>() == 928);
 
+// ── Context Save/Restore Assembly Inclusion ─────────────────────────────────
+// Pulls in `src/vm/entry.s`, which contains the `vm_entry` / `vm_exit` primitives
+// for switching between Hypervisor (EL2) and Guest (EL1).
+//
+// The offset values below are forwarded to the assembly file as `.equ` constants,
+// ensuring the Rust structure layout and the Assembly code are perfectly synchronized:
+//   • The `offset_of!` assertions above guarantee that if the `VcpuRegs` struct
+//     changes, compilation will fail before any mismatched assembly is executed.
+//   • `VCPU_SIZE` is passed in to define the total size of the register state,
+//     which will be used by `vm_exit` to allocate stack frame space.
+core::arch::global_asm!(
+    include_str!("entry.s"),
+    VCPU_X_OFF       = const VCPU_REGS_X_OFFSET,
+    VCPU_SP_EL1_OFF  = const VCPU_REGS_SP_EL1_OFFSET,
+    VCPU_PC_OFF      = const VCPU_REGS_PC_OFFSET,
+    VCPU_PSTATE_OFF  = const VCPU_REGS_PSTATE_OFFSET,
+    VCPU_SYS_OFF     = const VCPU_REGS_SYS_OFFSET,
+    VCPU_FP_OFF      = const VCPU_REGS_FP_OFFSET,
+    VCPU_SIZE        = const core::mem::size_of::<VcpuRegs>(),
+);
+
 // ── vCPU ─────────────────────────────────────────────────────────────────────
 
 /// Maximum number of vCPUs per VM.
