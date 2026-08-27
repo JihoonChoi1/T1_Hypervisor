@@ -345,6 +345,15 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // single-core boot.
     unsafe { vm::loader::load_hft_payload() };
 
+    // ── Release the HFT guest ───────────────────────────────────────────────
+    // The Guest OS image and its initial registers (vcpu[0]) are fully loaded.
+    // Flipping this flag to `true` signals CPU 1 (which has been busy-polling)
+    // to break out of its loop and immediately enter the Guest OS.
+    // (Note: CPUs 2 and 3 remain in their waiting loop because only vcpu[0]
+    // is configured right now. If all entered, they would crash sharing one stack).
+    // From this point on, CPU 0(the Management Core) must NEVER modify `HFT_VM`.
+    cpu::secondary::GUEST_READY.store(true, core::sync::atomic::Ordering::Release);
+
     // HFT pool drain verification.  `alloc_hft_ram()` above consumed every
     // page pre-allocated by `init_hft_pool()` (32 768 pages).  `alloc_mgmt_ram`
     // runs afterwards but draws from the PMM via the Mgmt-color filter

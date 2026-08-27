@@ -390,28 +390,70 @@ unsafe extern "C" {
     pub fn vm_entry(vcpu_regs: *mut VcpuRegs) -> !;
 }
 
-/// Enter a guest VM on the calling physical core. **VM-Entry (ERET EL2 → EL1) stub.**
+/// Enter a guest VM on the calling physical CPU.
+/// This function never returns. Execution leaves Rust and gets into the Guest OS.
+/// It only returns to the hypervisor later through an Exception (VM Exit).
 ///
-/// Writes HCR_EL2 per VmType before ERET, ensuring correct interrupt routing:
-///   ManagementVM → 0x80080019  (VM|TSC|RW|IMO|FMO — IRQ routing active)
-///   HftEngineVM  → 0x80080001  (VM|TSC|RW — interrupt-free)
+/// Hardware Setup Sequence before entry:
+///   (This mirrors Linux KVM's per-entry stage-2 context load)
+///   1. `HCR_EL2`: Configure routing rules. (e.g., should hardware interrupts
+///      go to the Guest or the Hypervisor?)
+///   2. `VTCR_EL2`: Configure Stage-2 translation settings. We do this here
+///      because secondary CPUs haven't initialized this register yet.
+///        Linux kernel, arch/arm64/include/asm/kvm_mmu.h — `__load_stage2`
+///   3. `VTTBR_EL2`: Tell the CPU where this specific Guest's memory dictionary
+///      (Stage-2 page table) is located, and attach the Guest's ID (VMID) to it.
+///        ARM DDI 0487 — search "VTTBR_EL2, Virtualization Translation Table
+///        Base Register"
+///   4. `dsb ish`: Wait for all previous memory writes (like copying the payload)
+///      to fully finish and reach the RAM.
+///   5. `isb`: A synchronization event so the VTTBR_EL2 write above actually
+///      takes effect before the TLBI below runs. The TLBI acts on "the current
+///      VMID", which the CPU reads out of VTTBR_EL2 — without this barrier it
+///      could still use the *old* VMID. (General rule: a system-register write
+///      isn't guaranteed visible to a later instruction that consumes it until
+///      a synchronization event; KVM puts the same ISB in this exact spot.)
+///        ARM DDI 0487 — search "General behavior of accesses to the AArch64
+///        System registers"
+///        Linux kernel, arch/arm64/kvm/hyp/nvhe/tlb.c — `enter_vmid_context`
+///   6. `tlbi vmalls12e1is`: Invalidate any cached address translations for
+///      this Guest's VMID across all cores. On this first-ever entry there are
+///      no stale entries yet (the VMID has never been active), so this is
+///      mostly defensive — but it is what keeps VMID *reuse* safe later, and
+///      cheap insurance that the Guest's first page-table walk reads the fresh
+///      tables we just built.
+///        ARM DDI 0487 — search "TLBI VMALLS12E1IS"
+///   7. `dsb ish`: Wait for that invalidation to complete across all cores.
+///   8. `isb`: Final sync, then jump into the assembly `vm_entry` function to
+///      load the Guest's registers and boot it.
 ///
 /// # Safety
-/// Must be called from EL2. `init_vms()` must have been called.
-/// After VM-Entry (ERET EL2 → EL1) fills this in, the stack frame will be invalidated by ERET.
-///
-/// TODO VM-Entry (ERET EL2 → EL1): write VTTBR_EL2 = (vm.id << 48) | vm.stage2_root
-/// TODO VM-Entry (ERET EL2 → EL1): restore VcpuRegs from vm.vcpus[vcpu_idx].regs
-/// TODO VM-Entry (ERET EL2 → EL1): ERET to EL1
-#[allow(dead_code)]
-pub unsafe fn enter_vm(vm: &Vm, _vcpu_idx: usize) {
+/// * Must be called from EL2, on the physical core that will run this vCPU.
+/// * `init_vms()`, `init_stage2()`, `init_guest_ram()` and the payload loader
+///   must all have completed, and their writes must be visible to this core
+///   (the caller synchronises via `GUEST_READY` Release/Acquire).
+/// * `vm.stage2_root` must be a valid Stage-2 L1 root PA (non-zero).
+/// * Never returns; the caller's stack frame is abandoned at ERET.
+pub unsafe fn enter_vm(vm: &mut Vm, vcpu_idx: usize) -> ! {
     let hcr = crate::cpu::hcr_for_vm(vm.vm_type);
+    let vttbr = ((vm.id as u64) << 48) | (vm.stage2_root as u64);
+    let regs: *mut VcpuRegs = &raw mut vm.vcpus[vcpu_idx].regs;
+
     unsafe {
         core::arch::asm!(
             "msr hcr_el2, {hcr}",
+            "msr vtcr_el2, {vtcr}",
+            "msr vttbr_el2, {vttbr}",
+            "dsb ish",
+            "isb",
+            "tlbi vmalls12e1is",
+            "dsb ish",
             "isb",
             hcr = in(reg) hcr,
-            options(nostack, nomem),
+            vtcr = in(reg) stage2::VTCR_EL2_VAL,
+            vttbr = in(reg) vttbr,
+            options(nostack),
         );
+        vm_entry(regs)
     }
 }

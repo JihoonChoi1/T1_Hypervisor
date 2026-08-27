@@ -51,6 +51,17 @@ static CORES_READY: AtomicI32 = AtomicI32::new(0);
 /// Secondaries spin on this flag (WFE) before entering the trading loop.
 static INIT_DONE_FLAG: AtomicBool = AtomicBool::new(false);
 
+/// Set to `true` by CPU 0 (`kmain`) once the HFT guest is fully built:
+/// Stage-2 tables populated, guest RAM zeroed, payload copied, vcpu[0]
+/// registers seeded.  CPU 1 polls this flag in its trading-loop and
+/// enters the guest when it flips.
+///
+/// Ordering contract: the Release store in `kmain` pairs with the Acquire
+/// poll below, so every payload byte and the vcpu[0] register seed are
+/// visible to CPU 1 before it can observe `true` (same pattern as
+/// `INIT_DONE_FLAG`).
+pub static GUEST_READY: AtomicBool = AtomicBool::new(false);
+
 /// Per-secondary stack storage: 3 × 64 KiB, 16-byte aligned.
 #[repr(C, align(16))]
 #[allow(dead_code)]
@@ -199,6 +210,43 @@ pub unsafe extern "C" fn secondary_main(cpu_id: u64) -> ! {
         cpu_id,
     )
     .ok();
+
+    // ── Step 9: Guest dispatch — CPU 1 only ──────────────────────────────
+    // CPU 1, 2, and 3 reach this point very quickly, while CPU 0 is still 
+    // busy setting up the Guest OS in the background. Therefore, we must 
+    // wait for the `GUEST_READY` signal from CPU 0 before entering the Guest.
+    // 
+    // Note: Currently, only CPU 1 is allowed to enter the Guest (`if cpu_id == 1`).
+    // The loader only configures the initial registers for `vcpu[0]`. If CPUs 2 and 3 
+    // also entered the Guest right now, all three cores would share the exact same 
+    // stack pointer (SP_EL1), causing immediate memory corruption and crashes.
+    // Thus, CPUs 2 and 3 skip this block and wait safely in the infinite loop below.
+    if cpu_id == 1 {
+        loop {
+            if GUEST_READY.load(Ordering::Acquire) {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        // SAFETY: We passed the GUEST_READY barrier, so we are guaranteed that 
+        // CPU 0 has completely finished building the guest (Stage-2, RAM, etc). 
+        // CPU 0 has handed over ownership and will no longer mutate HFT_VM, 
+        // so it is safe for us to take an exclusive reference (&mut) to it.
+        let vm = unsafe { crate::vm::hft_vm() };
+        writeln!(
+            &mut &UART,
+            "[hft ] CPU {} entering HFT guest (vcpu 0, PC={:#x})",
+            cpu_id, vm.vcpus[0].regs.pc,
+        )
+        .ok();
+
+        // SAFETY: We are correctly running in Hypervisor mode (EL2) and are 
+        // officially assigned to run `vcpu[0]`. All setup preconditions are met.
+        // This function executes `ERET` to drop privilege to the Guest OS (EL1) 
+        // and will never return back to this Rust code.
+        unsafe { crate::vm::enter_vm(vm, 0) }
+    }
 
     loop {
         core::hint::spin_loop();

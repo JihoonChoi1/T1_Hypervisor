@@ -154,13 +154,20 @@ impl S2Prot {
 ///
 /// Note: SL0=01 with T0SZ=32 and 4 KiB granule → walk starts at Level 1.
 /// This gives a 2-level walk (L1→L2 for 2 MiB blocks, L1→L2→L3 for 4 KiB pages).
-const VTCR_EL2_VAL: u64 = 0x80023560;
+///
+/// `pub` because VTCR_EL2 is banked per core: `init_vtcr_el2()` below only
+/// programs the boot core's copy, so `vm::enter_vm()` must rewrite this value
+/// on whichever core is entering a guest.  Linux KVM does the same — VTCR is
+/// written on every guest context load, not once at boot.
+///   Linux kernel, arch/arm64/include/asm/kvm_mmu.h — `__load_stage2`
+pub const VTCR_EL2_VAL: u64 = 0x80023560;
 
 /// Initialise VTCR_EL2 — the Stage-2 translation control register.
 ///
-/// Must be called **once** from the Management core (CPU 0) before any VM entry.
-/// Subsequent ERET instructions to EL1 will use this configuration for Stage-2
-/// address translation.
+/// Called from the Management core (CPU 0) during `init_stage2()`; its purpose
+/// is boot-time verification (readback + UART log).  Because VTCR_EL2 is a
+/// per-core register, this write covers CPU 0 only — every actual guest entry
+/// rewrites VTCR_EL2 for the entering core inside `vm::enter_vm()`.
 ///
 /// # Verification
 /// Reads back VTCR_EL2 after writing and logs:
