@@ -151,7 +151,8 @@ pub(crate) unsafe fn clean_inval_page_to_poc(pa: usize) {
 ///    so the guest reads DRAM directly and would miss the cached zeros.
 /// 4. Install a Stage-2 L3 PAGE descriptor with `S2Prot::Rw` — Normal-WB
 ///    Inner-Shareable, S2AP=0b11, XN=1.  The executable `.text` range is
-///    downgraded to `S2Prot::RoX` by the payload loader (TODO);
+///    downgraded to `S2Prot::RoX` by the payload loader
+///    (`vm::loader::load_hft_payload`);
 ///    initial XN=1 blanket is intentional W^X discipline at Stage-2,
 ///    matching KVM/Xen default guest-RAM policy.
 /// 5. Once the full pass is complete, issue a single `dsb ish` (reads-and-

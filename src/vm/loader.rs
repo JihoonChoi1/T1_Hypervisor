@@ -30,8 +30,8 @@
 //   ARM DDI 0487 — search "DC CIVAC"
 //   ARM DDI 0487 — search "DSB"
 //   ARM DDI 0487 — search "PSTATE fields that are meaningful in AArch64 state"
-//   ARM DDI 0601 — search "SPSR_EL2, Saved Program Status Register (EL2)"
-//   ARM DDI 0601 — search "SCTLR_EL1, System Control Register (EL1)"
+//   ARM DDI 0487 — search "SPSR_EL2, Saved Program Status Register (EL2)"
+//   ARM DDI 0487 — search "SCTLR_EL1, System Control Register (EL1)"
 //   torvalds/linux, arch/arm64/kvm/hyp/pgtable.c — `dcache_clean_inval_poc`
 // ============================================================================
 
@@ -45,6 +45,7 @@ use crate::uart::UART;
 use crate::vm::hft_vm;
 use crate::vm::ram::clean_inval_page_to_poc;
 use crate::vm::stage2;
+use crate::vm::stage2::S2Prot;
 
 // ── Payload image ────────────────────────────────────────────────────────────
 
@@ -124,6 +125,12 @@ const GUEST_SCTLR_EL1_VAL: u64 = 0x30D5_0838;
 ///           adjacent IPA pages back onto non-contiguous PAs).
 ///        b. Copy the chunk into the host PA.
 ///        c. `DC CIVAC` every cache line in the page — see module header.
+///        d. Remap the page `S2Prot::RoX`. Earlier, `init_guest_ram` 
+///           initialized all guest memory as Read-Write but Non-Executable 
+///           (Rw, XN=1) for safety. Since this chunk contains the guest's 
+///           program code, we must change its permission to Read-Only + 
+///           Executable (`RoX`). Otherwise, the guest will crash with a 
+///           permission fault when it tries to run its first instruction.
 ///   3. Single `dsb ish` to drain every `DC CIVAC` issued in step 2c.
 ///   4. Seed the first vCPU's register file: PC = `ipa_base`, SP_EL1 just
 ///      below the 1 MiB mark, SPSR_EL2 = EL1h/DAIF-masked, SCTLR_EL1 set to
@@ -190,6 +197,22 @@ pub unsafe fn load_hft_payload() {
         unsafe {
             copy_nonoverlapping(PAYLOAD.as_ptr().add(off), pa as *mut u8, chunk);
             clean_inval_page_to_poc(pa);
+        }
+
+        // Change the permission of this page to Read-Only + Executable (RoX).
+        // Earlier, `init_guest_ram` safely set all guest memory to Read-Write 
+        // but Non-Executable (Rw, XN=1). If we don't change this specific page 
+        // to be executable, the Guest OS will crash with a permission fault 
+        // (Instruction Abort) the moment it tries to run its first line of code.
+        // 
+        // We can safely rewrite this memory rule without any special CPU cache 
+        // flushing tricks because the Guest OS hasn't even booted yet, so the 
+        // CPU hasn't cached the old rule.
+        //   ARM DDI 0487 — search "Stage 2 permissions"
+        //   ARM DDI 0487 — search "General TLB maintenance requirements"
+        // SAFETY: same root/ipa/pa the walker just validated; single-core boot.
+        unsafe {
+            stage2::stage2_map_4k(vm.stage2_root, ipa, pa, S2Prot::RoX);
         }
 
         off += PAGE_SIZE;
