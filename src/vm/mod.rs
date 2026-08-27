@@ -372,6 +372,24 @@ pub unsafe fn hft_vm() -> &'static mut Vm {
     unsafe { (*addr_of_mut!(HFT_VM)).assume_init_mut() }
 }
 
+// ── Assembly primitives (src/vm/entry.s) ─────────────────────────────────────
+
+unsafe extern "C" {
+    /// Starts (or resumes) the Guest OS by loading its registers from `vcpu_regs`
+    /// and executing the `eret` instruction to drop to EL1.
+    /// This function is implemented in Assembly in `src/vm/entry.s`.
+    ///
+    /// # Safety
+    /// * Must only be called from EL2 (Hypervisor mode).
+    /// * Before calling, the hypervisor must have already configured the Guest's
+    ///   memory tables (VTTBR_EL2), routing rules (HCR_EL2), and properly flushed
+    ///   the memory caches (TLB flush sequence) for this specific Guest.
+    /// * This function **never returns** to the calling Rust code. The next time
+    ///   the Hypervisor gets control, it will be through an Exception (VM Exit)
+    ///   that jumps directly to `vm_exit_sync` or `vm_exit_irq` in the vector table.
+    pub fn vm_entry(vcpu_regs: *mut VcpuRegs) -> !;
+}
+
 /// Enter a guest VM on the calling physical core. **VM-Entry (ERET EL2 → EL1) stub.**
 ///
 /// Writes HCR_EL2 per VmType before ERET, ensuring correct interrupt routing:
