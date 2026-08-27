@@ -232,3 +232,231 @@ The log showed no `Data Abort` or `Undefined Instruction` entries. Full boot out
 ```
 
 The BSS zeroing loop now survives the addition of any size or alignment of static data without risk of overrunning RAM.
+
+---
+
+# Debugging Log: Exception Vector Table Misalignment
+
+**Date:** 2026-08-26
+**Module:** Exceptions (`src/exception.s`)
+**Severity:** Critical (Latent bug — the entries in our vector table were shifted, causing the hardware to jump to the wrong code. Luckily, we caught this while inspecting the compiled file before actually running it.)
+
+## 1. Issue Description
+
+- **Symptom:** There were no runtime errors — every boot was successful. The bug was discovered while manually inspecting the compiled code (`objdump`) to verify our new `vm_exit_sync` connection.
+- **Observation:** ARM hardware strictly requires the "Guest Trap" (Entry 8) to be located exactly at the `+0x400` address offset. When I checked that exact address (see section 2 for the full command), the slot did not start with our expected `b vm_exit_sync` jump instruction. Instead, I found this:
+
+```
+40200c00: d10443ff     sub  sp, sp, #0x110
+```
+
+This instruction (`sub sp, sp, #0x110`) is a heavy register-saving code that belongs to an earlier entry, NOT the simple jump instruction we expected. The hardware was going to jump to the wrong code.
+
+## 2. Debugging Process
+
+### Step 1 — The symbol check that started it all
+
+I needed to verify that our three new assembly labels actually made it into the final compiled binary. I also searched for `exception_vectors` to find the base address of our vector table:
+
+```bash
+rust-objdump -d target/aarch64-unknown-none/release/T1_Hypervisor \
+    | grep -E '<(vm_entry|vm_exit_sync|vm_exit_irq|exception_vectors)>:'
+```
+```
+00000000402000ac <vm_entry>:
+00000000402001d8 <vm_exit_sync>:
+0000000040200800 <exception_vectors>:
+```
+
+This output told us two things:
+
+1. The vector table base address is `0x40200800`.
+2. `vm_exit_irq` seemed to be **missing**. However, this was a false alarm: `vm_exit_irq` and `vm_exit_sync` point to the exact same address. The `objdump` tool only prints one label per address. The symbol-table confirmed both exist:
+
+```bash
+rust-objdump -t target/aarch64-unknown-none/release/T1_Hypervisor \
+    | grep -E 'vm_entry|vm_exit_sync|vm_exit_irq'
+```
+```
+00000000402000ac g       .text	0000000000000000 vm_entry
+00000000402001d8 g       .text	0000000000000000 vm_exit_sync
+00000000402001d8 g       .text	0000000000000000 vm_exit_irq    ← same address: an alias, not missing
+```
+
+This false alarm taught us an important lesson: **just because a symbol exists doesn't mean it's placed at the exact address the hardware expects.** The CPU doesn't read our labels; it just blindly jumps to `VBAR_EL2 + 0x400`. We needed to check the actual address placement.
+
+### Step 2 — Checking the actual hardware addresses → the bug appears
+
+Using the base address from Step 1, I calculated the expected hardware addresses:
+
+```
+Entry 8 (guest sync trap): 0x40200800 + 0x400 = 0x40200c00   → must start with: b vm_exit_sync
+Entry 9 (guest IRQ):       0x40200800 + 0x480 = 0x40200c80   → must start with: b vm_exit_irq
+```
+
+(For the same reason as Step 1, objdump displays both branch targets under the same name, `<vm_exit_sync>` — the two slots are still two distinct branch instructions to the shared address.)
+
+I checked the compiled code exactly at these two addresses. A correct entry must have a jump as its very first instruction:
+
+```bash
+rust-objdump -d --start-address=0x40200c00 --stop-address=0x40200c88 \
+    target/aarch64-unknown-none/release/T1_Hypervisor | grep -E '^\s*40200c(00|80)'
+```
+```
+40200c00: d10443ff     sub  sp, sp, #0x110
+40200c80: a94a57f4     ldp  x20, x21, [sp, #0xa0]
+```
+
+Neither entry starts with a jump — this was the actual bug. Both instructions were clearly from the wrong place:
+
+- `sub sp, sp, #0x110` — This allocates 272 bytes, which is our exact `ExceptionFrame` size. This is the **first instruction of our `SAVE_CONTEXT` macro**. It belongs to an earlier handler, not Entry 8.
+- `ldp x20, x21, [sp, #0xa0]` — This is the **middle of a `RESTORE_CONTEXT` sequence**. Entry 9's address pointed to the middle of someone else's code.
+
+### Step 3 — Finding where the shift begins
+
+Since the code was in the wrong place, I checked the exact addresses of all the labels in the vector table to see where things went wrong:
+
+```bash
+rust-objdump -d --start-address=0x40200a00 --stop-address=0x40200d90 \
+    target/aarch64-unknown-none/release/T1_Hypervisor | grep -E '^00000000[0-9a-f]+ <'
+```
+
+Expected vs. actual addresses (Assuming the table starts at `0x40200800`):
+
+| Entry | Label | Required Hardware Offset | Expected Address | Actual Address | Shift Amount |
+|---|---|---|---|---|---|
+| 4 | `curr_el_spx_sync` | +0x200 | 0x40200a00 | 0x40200a00 | 0 |
+| 5 | `curr_el_spx_irq` | +0x280 | 0x40200a80 | **0x40200b00** | +0x80 (Delayed by 1 slot) |
+| 6 | `curr_el_spx_fiq` | +0x300 | 0x40200b00 | **0x40200b80** | +0x80 |
+| 7 | `curr_el_spx_serr` | +0x380 | 0x40200b80 | **0x40200c00** | +0x80 |
+| 8 | `lower_el_aarch64_sync` | +0x400 | 0x40200c00 | **0x40200d00** | +0x100 (Delayed by 2 slots) |
+| 9 | `lower_el_aarch64_irq` | +0x480 | 0x40200c80 | **0x40200d80** | +0x100 |
+
+Everything after Entry 4 was pushed back by one slot (+0x80 bytes), and everything after Entry 7 was pushed back by two slots (+0x100 bytes). Entries 4 and 7 were the cause of the shift.
+
+## 3. Root Cause Analysis
+
+### 3-A. The Overflowing Entries
+
+Entries 4 and 7 had their massive block of code written directly inside the vector table space:
+
+```asm
+// BUGGY (original):
+.balign 0x80        // entry 4: Synchronous  ← EL2 hypervisor fault (bug)
+curr_el_spx_sync:
+    SAVE_CONTEXT                   // 22 instructions =  88 bytes
+    bl      el2_sync_handler       //  1 instruction  =   4 bytes
+    RESTORE_CONTEXT                // 21 instructions =  84 bytes
+    eret                           //  1 instruction  =   4 bytes
+                                   // total: 45 instructions = 180 bytes
+```
+
+An ARM vector slot is strictly limited to **128 bytes (32 instructions)**. But our code was 180 bytes. The code was too large for the slot and overflowed by 52 bytes.
+
+### 3-B. Why the Compiler Stayed Silent
+
+The `.balign 0x80` command just means "put the next label at the next multiple of 128". It does NOT mean "warn me if the previous code was larger than 128 bytes". 
+So the compiler silently pushed Entry 5 to the next available 128-byte boundary, which was one slot too late. The CPU hardware, however, doesn't care about our labels. When an error happens, it blindly jumps exactly `+0x400` bytes forward.
+
+### 3-C. Why It Was Never Triggered Before
+
+This bug has existed since we first wrote the table. We never noticed because the hypervisor had never actually booted a guest OS yet, so Entries 5 through 15 were never triggered. Only Entry 4 was ever used during our early tests, and since Entry 4 was placed *before* the first overflow, it worked perfectly.
+ 
+
+## 4. Resolution
+
+I adopted the standardized approach used by world-class hypervisors like Linux KVM and Xen: **Every single entry must contain exactly ONE instruction (a jump to the outside).**
+
+### Fix — The `VECTOR_ENTRY` macro
+
+```asm
+// FIXED:
+.macro VECTOR_ENTRY label, target
+.balign 0x80
+\label:
+    b   \target
+.endm
+
+// Now all 16 entries use the macro. Each slot only takes 4 bytes.
+// Overflowing is now structurally impossible:
+VECTOR_ENTRY curr_el_spx_sync, el2_spx_sync_body       // entry 4
+...
+VECTOR_ENTRY lower_el_aarch64_sync, vm_exit_sync       // entry 8
+```
+
+The massive 180-byte codes were moved to the bottom of the file (outside the table) and named `el2_spx_sync_body`. This costs nothing in performance but completely guarantees that our vector slots will never overflow again.
+
+## 5. Verification
+
+I re-checked the compiled file:
+
+```bash
+rust-objdump -d --start-address=0x40200800 --stop-address=0x40201100 \
+    target/aarch64-unknown-none/release/T1_Hypervisor | grep -A1 -E '^00000000[0-9a-f]+ <'
+```
+```
+0000000040200800 <exception_vectors>:
+40200800: 1400023b      b       0x402010ec <unhandled_exception>
+--
+0000000040200880 <curr_el_sp0_irq>:
+40200880: 1400021b      b       0x402010ec <unhandled_exception>
+--
+0000000040200900 <curr_el_sp0_fiq>:
+40200900: 140001fb      b       0x402010ec <unhandled_exception>
+--
+0000000040200980 <curr_el_sp0_serr>:
+40200980: 140001db      b       0x402010ec <unhandled_exception>
+--
+0000000040200a00 <curr_el_spx_sync>:
+40200a00: 14000161      b       0x40200f84 <el2_spx_sync_body>
+--
+0000000040200a80 <curr_el_spx_irq>:
+40200a80: 1400019b      b       0x402010ec <unhandled_exception>
+--
+0000000040200b00 <curr_el_spx_fiq>:
+40200b00: 1400017b      b       0x402010ec <unhandled_exception>
+--
+0000000040200b80 <curr_el_spx_serr>:
+40200b80: 1400012e      b       0x40201038 <el2_spx_serr_body>
+--
+0000000040200c00 <lower_el_aarch64_sync>:
+40200c00: 17fffd76      b       0x402001d8 <vm_exit_sync>
+--
+0000000040200c80 <lower_el_aarch64_irq>:
+40200c80: 17fffd56      b       0x402001d8 <vm_exit_sync>
+--
+0000000040200d00 <lower_el_aarch64_fiq>:
+40200d00: 140000fb      b       0x402010ec <unhandled_exception>
+--
+0000000040200d80 <lower_el_aarch64_serr>:
+40200d80: 140000db      b       0x402010ec <unhandled_exception>
+--
+0000000040200e00 <lower_el_aarch32_sync>:
+40200e00: 140000bb      b       0x402010ec <unhandled_exception>
+--
+0000000040200e80 <lower_el_aarch32_irq>:
+40200e80: 1400009b      b       0x402010ec <unhandled_exception>
+--
+0000000040200f00 <lower_el_aarch32_fiq>:
+40200f00: 1400007b      b       0x402010ec <unhandled_exception>
+--
+0000000040200f80 <lower_el_aarch32_serr>:
+40200f80: 1400005b      b       0x402010ec <unhandled_exception>
+--
+0000000040200f84 <el2_spx_sync_body>:
+40200f84: d10443ff      sub     sp, sp, #0x110
+--
+0000000040201038 <el2_spx_serr_body>:
+40201038: d10443ff      sub     sp, sp, #0x110
+--
+00000000402010ec <unhandled_exception>:
+402010ec: d503205f      wfe
+--
+00000000402010f4 <_RNvCsdBezzDwma51_7___rustc17rust_begin_unwind>:
+402010f4: d100c3ff      sub     sp, sp, #0x30
+```
+
+- All 16 labels now land exactly at their perfect 128-byte boundaries (`0x40200800` + `0x80×N`, N = 0…15).
+- Entry 8 (`0x40200c00`) is now correctly placed as `b vm_exit_sync`.
+- The code successfully compiled with 0 warnings, and boots cleanly in QEMU. 
+- The bug is permanently eradicated.
