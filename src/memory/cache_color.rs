@@ -368,7 +368,7 @@ pub fn print_info() {
         &mut &UART,
         "[cache] NOTE: Cortex-A72 L2 index formula undocumented by ARM. \
          Simple PA[15:6] model empirically confirmed by Xen on real A72 hardware. \
-         Verify set separation via L2D_CACHE_REFILL on RPi4 (Phase 9).",
+         Verify set separation via L2D_CACHE_REFILL on RPi4 (Phase 8, Step P4).",
     )
     .ok();
 }

@@ -14,10 +14,12 @@ cache-colored memory to reduce cross-core L2 contention.
 Primary target is the **QEMU `virt`** machine; the codebase also carries
 **Raspberry Pi 4 (BCM2711 / Cortex-A72)** paths behind a `rpi4` Cargo feature.
 
-> **Current milestone:** boots end-to-end — EL2 setup, Stage-1 MMU, SMP bring-up,
-> per-VM Stage-2 tables, guest-RAM allocation, and the HFT guest payload copied
-> into guest RAM with `vcpu[0]` seeded — then idles on core 0. Guest execution
-> (VM entry) is the next milestone; see [Roadmap](#roadmap).
+> **Current milestone:** a guest runs. Core 1 ERETs into the HFT payload at
+> EL1 under Stage-2 translation; core 0 stays in host EL2 and watches the
+> guest's heartbeat through a shared page. Pulling the kill switch makes the
+> guest trap back with `HVC #1`, which EL2 decodes and parks. Verified on
+> QEMU; real-hardware measurement (Raspberry Pi 4) is next — see
+> [Roadmap](#roadmap).
 
 ---
 
@@ -206,18 +208,25 @@ The order executed by `kmain` (`src/main.rs`) on core 0:
 9. VM descriptors, shared pages, VTCR + per-VM Stage-2 tables
 10. Guest-RAM allocation + Stage-2 mapping for both VMs
 11. HFT payload copied into guest RAM, `vcpu[0]` seeded
-12. Core 0 enters `WFI` idle loop
+12. `GUEST_READY` released: core 1 ERETs into the payload at EL1 (`vcpu[0]`)
+13. Core 0 runs the heartbeat observer (polls `CNTPCT_EL0`, samples every
+    0.5 s) until the kill switch halts the guest
 
 ---
 
 ## Roadmap
 
-The boot path currently ends after the guest payload is loaded. Next:
+Done: VM entry (`ERET` EL2→EL1 with `VTCR`/`VTTBR` + TLBI sequencing), the
+VM-exit save/restore path, the core-0 heartbeat observer, and the kill-switch
+round trip (`HVC #1` → EL2). Next:
 
-- **VM entry** — `ERET` EL2→EL1 into the guest (`VTTBR_EL2` + TLBI sequencing).
-- **VM-exit handler** — `ESR_EL2` EC routing (HVC, Stage-2 aborts, WFI/WFE traps).
-- **Management event loop** — drive the watchdog / kill switch / IPC at runtime.
-- **Polling-mode NIC passthrough** for the HFT engine.
+- **Raspberry Pi 4 bring-up** — boot on real Cortex-A72 silicon.
+- **Cache-coloring A/B measurement** — L2 refills (PMU event 0x17) with and
+  without coloring on a real L2. This turns the project's central claim from
+  a design intent into a measurement.
+
+Out of scope for now: full `ESR_EL2.EC` routing, multi-vCPU guests on cores
+2–3, and polling-mode NIC passthrough.
 
 ---
 
@@ -278,6 +287,20 @@ qemu-system-aarch64 -machine virt,virtualization=on -cpu cortex-a57 \
 
 `virtualization=on` is required so the CPU starts in EL2. Exit `-nographic` QEMU
 with `Ctrl-A X`.
+
+A plain run boots, enters the guest, prints ten heartbeat samples, pulls the
+kill switch, and stops once the heartbeat is frozen. Press `k` to pull it
+earlier.
+
+### Step-through demo
+
+```sh
+cargo run --release --features demo
+```
+
+Pauses after each boot stage and waits for Enter; after the guest starts,
+`k` pulls the kill switch. `python3 scripts/capture_demo.py` drives this mode
+automatically and records the run to `demo/transcript.json`.
 
 ### Debug with GDB
 

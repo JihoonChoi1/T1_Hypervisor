@@ -98,6 +98,23 @@ pub unsafe fn init_watchdog() -> usize {
 /// `init_watchdog()` must have been called.
 pub unsafe fn check_watchdog(last_hb: &mut u64, miss: &mut u8) {
     let page = unsafe { &*(WATCHDOG_PA as *const WatchdogPage) };
+
+    // RPi4 coherency: the MMU-off guest writes the heartbeat uncached
+    // (Device-nGnRnE effective), while this core reads it through a
+    // Normal-WB Stage-1 mapping.  Without discarding our cached copy first,
+    // real silicon would keep returning the stale line forever — a symptom
+    // indistinguishable from a dead guest or a broken Stage-2 mapping.
+    // QEMU has no cache model, so the QEMU path skips this.
+    #[cfg(feature = "rpi4")]
+    unsafe {
+        core::arch::asm!(
+            "dc civac, {a}",
+            "dsb sy",
+            a = in(reg) WATCHDOG_PA,
+            options(nostack, preserves_flags),
+        );
+    }
+
     let current = page.heartbeat.load(Ordering::Acquire);
 
     if current == *last_hb {

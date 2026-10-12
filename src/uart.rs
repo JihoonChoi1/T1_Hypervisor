@@ -34,6 +34,8 @@ mod regs {
 
 /// Flag Register bits.
 mod fr_bits {
+    /// RX FIFO Empty: if set, there is no received byte to read from DR.
+    pub const RXFE: u32 = 1 << 4;
     /// TX FIFO Full: if set, we must wait before writing to DR.
     pub const TXFF: u32 = 1 << 5;
 }
@@ -107,6 +109,19 @@ impl Uart {
             core::hint::spin_loop();
         }
         self.write_reg(regs::DR, byte as u32);
+    }
+
+    /// Receives a single byte without blocking.
+    ///
+    /// Returns `None` when the RX FIFO is empty.  Polled from the Management
+    /// core's observer loop — no RX interrupt is ever enabled, so the UART
+    /// adds no IRQ traffic to the system.
+    pub fn try_read_byte(&self) -> Option<u8> {
+        if self.read_reg(regs::FR) & fr_bits::RXFE != 0 {
+            return None;
+        }
+        // DR[7:0] is the data byte; DR[11:8] are error flags (ignored).
+        Some(self.read_reg(regs::DR) as u8)
     }
 
     /// Transmits a string of bytes.

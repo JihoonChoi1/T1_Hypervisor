@@ -244,7 +244,7 @@ pub struct Vm {
     /// Role of this VM.
     pub vm_type: VmType,
     /// Host PA of the Stage-2 L1 page table root (written to VTTBR_EL2).
-    /// Initialised to 0; filled when implementing Stage-2 Translation Tables.
+    /// Initialised to 0; assigned by `stage2::init_stage2()`.
     pub stage2_root: usize,
     /// IPA base address of guest RAM (0x4000_0000 for both VMs).
     pub ipa_base: usize,
@@ -348,7 +348,7 @@ pub unsafe fn init_vms() {
     .ok();
     writeln!(
         &mut &UART,
-        "[vm  ] stage2_root: MGMT={:#010x}  HFT={:#010x}  (filled when implementing Stage-2 Translation Tables)",
+        "[vm  ] stage2_root: MGMT={:#010x}  HFT={:#010x}  (assigned by init_stage2)",
         mgmt.stage2_root, hft.stage2_root,
     )
     .ok();

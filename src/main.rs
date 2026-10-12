@@ -8,6 +8,7 @@ mod uart;
 use uart::UART;
 
 mod cpu;
+mod demo;
 mod exception;
 mod irq;
 mod memory;
@@ -153,6 +154,8 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
         }
     }
 
+    demo::gate(1, "build EL2 page tables and turn the MMU on (W^X enforced)");
+
     // ── Stage-1 Page Table construction ────────────────────────────
     // Allocate one 4 KiB page from the PMM and fill it with 512 × 2 MiB Block
     // Descriptors covering UART MMIO (Device-nGnRnE) and all RAM (Normal-WB).
@@ -250,6 +253,8 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // firmware mailbox (property channel 8).
     cpu::freq::init_freq();
 
+    demo::gate(2, "wake CPUs 1-3 and seal them off from every interrupt");
+
     // ── Secondary Core Wakeup & HFT Isolation ───────────────────
     // Wake CPU 1–3 via PSCI CPU_ON, wait for each to:
     //   • install VBAR_EL2 + MMU
@@ -259,6 +264,8 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // Then broadcast SEV to release them into their trading loops.
     cpu::secondary::boot_secondary_cores();
     cpu::secondary::release_secondary_cores();
+
+    demo::gate(3, "split the L2 cache between the two VMs by page color");
 
     // ── Cache Partitioning PoC ──────────────────────────────────────
     // 1. Print L2 cache geometry and heuristic page-color configuration.
@@ -278,6 +285,8 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
 
     // Safety: PMM fully initialised; boot-time only.
     unsafe { memory::cache_color::run_poc_verification(4) };
+
+    demo::gate(4, "build both VMs: shared pages, Stage-2 tables, guest RAM, payload");
 
     // ── VM Fabric Initialisation ─────────────────────────────────────────────
     // Create the ManagementVM (id=0, core=0) and HftEngineVM (id=1, core=1)
@@ -345,6 +354,24 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // single-core boot.
     unsafe { vm::loader::load_hft_payload() };
 
+    // HFT pool drain verification.  `alloc_hft_ram()` above consumed every
+    // page pre-allocated by `init_hft_pool()` (32 768 pages).  `alloc_mgmt_ram`
+    // runs afterwards but draws from the PMM via the Mgmt-color filter
+    // (`alloc_with_filter`), never touching the HFT bump pool, so this
+    // counter reflects the pool's post-`alloc_hft_ram` state as required.
+    // A non-zero value would indicate either an accounting bug in the bump
+    // index or an early exit from the HFT pass.
+    // Printed before the release below so CPU 1's entry line cannot
+    // interleave with it.
+    writeln!(
+        &mut &UART,
+        "[vm  ] HFT pool remaining = {} (expected 0, pool fully drained)",
+        memory::cache_color::hft_pool_remaining(),
+    )
+    .ok();
+
+    demo::gate(5, "release CPU 1 into the guest at EL1, then watch it from EL2");
+
     // ── Release the HFT guest ───────────────────────────────────────────────
     // The Guest OS image and its initial registers (vcpu[0]) are fully loaded.
     // Flipping this flag to `true` signals CPU 1 (which has been busy-polling)
@@ -354,27 +381,99 @@ pub extern "C" fn kmain(dtb_ptr: usize) -> ! {
     // From this point on, CPU 0(the Management Core) must NEVER modify `HFT_VM`.
     cpu::secondary::GUEST_READY.store(true, core::sync::atomic::Ordering::Release);
 
-    // HFT pool drain verification.  `alloc_hft_ram()` above consumed every
-    // page pre-allocated by `init_hft_pool()` (32 768 pages).  `alloc_mgmt_ram`
-    // runs afterwards but draws from the PMM via the Mgmt-color filter
-    // (`alloc_with_filter`), never touching the HFT bump pool, so this
-    // counter reflects the pool's post-`alloc_hft_ram` state as required.
-    // A non-zero value would indicate either an accounting bug in the bump
-    // index or an early exit from the HFT pass.
-    writeln!(
-        &mut &UART,
-        "[vm  ] HFT pool remaining = {} (expected 0, pool fully drained)",
-        memory::cache_color::hft_pool_remaining(),
-    )
-    .ok();
+    writeln!(&mut &UART, "[wd  ] heartbeat observer running.").ok();
 
-    writeln!(&mut &UART, "[boot] Entering idle loop. System halted.").ok();
+    // Safety: init_watchdog / init_killswitch have run and the guest has
+    // been released; this core never touches HFT_VM from here on.
+    unsafe { heartbeat_observer() }
+}
 
-    // Management core idle loop — future phases replace this with the
-    // hypervisor's IRQ-driven event loop.
+/// Sampling period of the observer: CNTFRQ / 2 ticks = 0.5 s.
+const OBSERVER_PERIOD_DIVISOR: u64 = 2;
+
+/// Without `--features demo`, the observer pulls the kill switch on its own
+/// after this many samples so a plain `cargo run` shows the full round trip.
+#[cfg(not(feature = "demo"))]
+const AUTO_KILL_AFTER_SAMPLES: u32 = 10;
+
+/// Consecutive unchanged samples, after the guest acknowledged the kill
+/// switch, before the observer reports the heartbeat as frozen and stops.
+/// Must stay below the watchdog's reset threshold (3) — a halt requested by
+/// the operator is not a hung guest.
+const FROZEN_SAMPLES: u8 = 2;
+
+/// Management-core observer loop (host EL2 on CPU 0, not a guest).
+///
+/// Polls `CNTPCT_EL0` instead of arming a timer interrupt — IRQ-driven
+/// management is post-demo — and every 0.5 s reads the guest's heartbeat
+/// through `watchdog::check_watchdog`.  The kill switch is raised either by
+/// pressing `k` on the console or, without the `demo` feature, automatically
+/// after `AUTO_KILL_AFTER_SAMPLES`.  Once the guest has trapped back with
+/// `HVC #1` and the heartbeat is confirmed frozen, the loop stops.
+///
+/// # Safety
+/// `init_watchdog()` and `init_killswitch()` must have been called.
+unsafe fn heartbeat_observer() -> ! {
+    let period = time::cntfrq() / OBSERVER_PERIOD_DIVISOR;
+    let mut next_sample = time::read_cntpct() + period;
+    let mut last_hb: u64 = 0;
+    let mut miss: u8 = 0;
+    let mut samples: u32 = 0;
+    let mut kill_raised = false;
+
+    #[cfg(feature = "demo")]
+    writeln!(&mut &UART, "[demo] press k to pull the kill switch.").ok();
+
+    loop {
+        if !kill_raised && matches!(UART.try_read_byte(), Some(b'k') | Some(b'K')) {
+            unsafe { raise_kill_switch() };
+            kill_raised = true;
+        }
+
+        if time::read_cntpct() < next_sample {
+            core::hint::spin_loop();
+            continue;
+        }
+        next_sample += period;
+
+        unsafe { vm::watchdog::check_watchdog(&mut last_hb, &mut miss) };
+        samples += 1;
+        writeln!(&mut &UART, "[wd  ] heartbeat={last_hb} (misses={miss})").ok();
+
+        #[cfg(not(feature = "demo"))]
+        if !kill_raised && samples == AUTO_KILL_AFTER_SAMPLES {
+            unsafe { raise_kill_switch() };
+            kill_raised = true;
+        }
+
+        if vm::exit::GUEST_HALTED.load(core::sync::atomic::Ordering::Acquire)
+            && miss >= FROZEN_SAMPLES
+        {
+            writeln!(
+                &mut &UART,
+                "[wd  ] guest halted: heartbeat frozen at {last_hb} after {samples} samples. CPU 0 idle.",
+            )
+            .ok();
+            break;
+        }
+    }
+
     loop {
         unsafe { core::arch::asm!("wfi") };
     }
+}
+
+/// Raise the kill switch and log it.
+///
+/// # Safety
+/// `init_killswitch()` must have been called.
+unsafe fn raise_kill_switch() {
+    unsafe { vm::killswitch::request_halt(b"operator kill switch") };
+    writeln!(
+        &mut &UART,
+        "[ks  ] kill switch raised by CPU 0 (flag=HALT_REQUESTED)",
+    )
+    .ok();
 }
 
 /// Panic handler: print the panic location over UART and halt.

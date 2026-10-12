@@ -190,9 +190,28 @@ pub fn read_cycle_counter() -> u64 {
 /// Used by diagnostic code to convert cycle counts to nanoseconds.
 /// Not on the hot path.
 #[inline]
-#[allow(dead_code)] // [TEST] Used Later (PMU cache miss counters and Latency Measurement Framework).
 pub fn cntfrq() -> u64 {
     read_cntfrq()
+}
+
+/// Read the physical system counter (`CNTPCT_EL0`).
+///
+/// Ticks at `cntfrq()` Hz on every core and is unaffected by CNTVOFF_EL2,
+/// so it is the wall-clock base for the Management core's polling loops.
+/// The `ISB` keeps the read from being performed early, ahead of the
+/// surrounding loop logic.
+#[inline]
+pub fn read_cntpct() -> u64 {
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "isb",
+            "mrs {v}, cntpct_el0",
+            v = out(reg) val,
+            options(nostack, nomem),
+        );
+    }
+    val
 }
 
 /// Read the L2 data cache refill counter (`PMEVCNTR0_EL0`).
