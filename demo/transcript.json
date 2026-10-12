@@ -1,0 +1,514 @@
+{
+  "captured_at": "2026-10-12T23:14:10+00:00",
+  "commit": "21a9758",
+  "dirty": true,
+  "command": "cargo build --release --features demo && qemu-system-aarch64 -machine virt,virtualization=on -cpu cortex-a57 -smp 4 -m 1G -nographic -kernel target/aarch64-unknown-none/release/T1_Hypervisor",
+  "steps": [
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[cpu ] HCR_EL2 = 0x0000000080080001  (VM|TSC|RW; FMO|IMO deferred to enter_vm per-VM)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cpu ] HCR_EL2 readback = 0x0000000080080001  (verified)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cpu ] CPTR_EL2 = 0x00000000000033ff  (0x33FF: RES1 preserved, TFP=0 FP/SIMD safely open)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cpu ] CPTR_EL2 readback = 0x00000000000033ff  (verified)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cpu ] SCTLR_EL2 = 0x0000000030c50838  (SA=1 + RES1, MMU/cache off, LE)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cpu ] SCTLR_EL2 readback = 0x0000000030c50838  (verified)"
+        },
+        {
+          "t": 0.001,
+          "text": "[cpu ] MAIR_EL2  = 0x00000000000000ff  (Slot0=Normal-WB 0xFF, Slot1=Device-nGnRnE 0x00)"
+        },
+        {
+          "t": 0.001,
+          "text": "[cpu ] MAIR_EL2  readback = 0x00000000000000ff  (verified)"
+        },
+        {
+          "t": 0.001,
+          "text": ""
+        },
+        {
+          "t": 0.001,
+          "text": "[mem ] Physical memory layout:"
+        },
+        {
+          "t": 0.001,
+          "text": "[mem ]   RAM           0x40000000 - 0x80000000  (1024 MiB)"
+        },
+        {
+          "t": 0.001,
+          "text": "[mem ]   UART MMIO     0x09000000 - 0x09001000  (Device-nGnRnE, 4 KiB)"
+        },
+        {
+          "t": 0.001,
+          "text": "[mem ]   PMM pool      0x40000000 - 0x80000000  (1024 MiB, Buddy Allocator)"
+        },
+        {
+          "t": 0.001,
+          "text": "[mem ]   HFT budget    128 MiB (32768 pages, color-filtered from pool)"
+        },
+        {
+          "t": 0.002,
+          "text": ""
+        },
+        {
+          "t": 0.002,
+          "text": "[pmm ] Buddy Allocator initialised:"
+        },
+        {
+          "t": 0.002,
+          "text": "[pmm ]   pool_start    = 0x40682000"
+        },
+        {
+          "t": 0.002,
+          "text": "[pmm ]   free pages    = 260478 (1017 MiB)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  1  (     8 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  2  (    16 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  3  (    32 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  4  (    64 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  5  (   128 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  6  (   256 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order  8  (  1024 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.003,
+          "text": "[pmm ]   order 11  (  8192 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 12  ( 16384 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 13  ( 32768 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 14  ( 65536 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 15  (131072 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 16  (262144 KiB)  →  1 block(s)"
+        },
+        {
+          "t": 0.004,
+          "text": "[pmm ]   order 17  (524288 KiB)  →  1 block(s)"
+        }
+      ],
+      "next": "build EL2 page tables and turn the MMU on (W^X enforced)"
+    },
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[mmu ] Stage-1 page tables built (2-level, T0SZ=32, 4KB granule)"
+        },
+        {
+          "t": 0.0,
+          "text": "[mmu ]   L1  @ 0x40682000  (L1[0]→L2_A, L1[1]→L2_B)"
+        },
+        {
+          "t": 0.0,
+          "text": "[mmu ]   L2_A@ 0x40683000  UART idx  72  PA 0x09000000  Device-nGnRnE  RW+NX"
+        },
+        {
+          "t": 0.0,
+          "text": "[mmu ]   L2_B@ 0x40684000  DTB    idx   0       PA 0x40000000..0x40200000  Normal-WB  RW+NX"
+        },
+        {
+          "t": 0.0,
+          "text": "[mmu ]   L2_B@ 0x40684000  TEXT   idx   1..  1  PA 0x40200000..0x40400000  Normal-WB  RO+X  ← W^X"
+        },
+        {
+          "t": 0.0,
+          "text": "[mmu ]   L2_B@ 0x40684000  RODATA idx   2..  2  PA 0x40400000..0x40600000  Normal-WB  RO+NX ← W^X"
+        },
+        {
+          "t": 0.001,
+          "text": "[mmu ]   L2_B@ 0x40684000  DATA   idx   3..511  PA 0x40600000..0x80000000  Normal-WB  RW+NX"
+        },
+        {
+          "t": 0.001,
+          "text": ""
+        },
+        {
+          "t": 0.001,
+          "text": "[mmu ] Stage-1 MMU enabled (2-level, T0SZ=32, 4KB granule)"
+        },
+        {
+          "t": 0.001,
+          "text": "[mmu ] TCR_EL2   = 0x0000000000023520"
+        },
+        {
+          "t": 0.001,
+          "text": "[mmu ] SCTLR_EL2 = 0x0000000030cd183d  (M=1)"
+        },
+        {
+          "t": 0.001,
+          "text": ""
+        },
+        {
+          "t": 0.001,
+          "text": "=========================================="
+        },
+        {
+          "t": 0.001,
+          "text": "  T1 Hypervisor - ARMv8-A / EL2          "
+        },
+        {
+          "t": 0.002,
+          "text": "=========================================="
+        },
+        {
+          "t": 0.002,
+          "text": "[boot] UART initialized."
+        },
+        {
+          "t": 0.002,
+          "text": "[boot] Exception vectors installed (VBAR_EL2 set)."
+        },
+        {
+          "t": 0.002,
+          "text": "[boot] DTB located at: 0x00000000"
+        },
+        {
+          "t": 0.002,
+          "text": "[topo] MPIDR_EL1 = 0x0000000080000000  Aff3=0 Aff2=0 Aff1=0 Aff0=0  MT=0  → Management (IRQ owner, EL2 init)"
+        },
+        {
+          "t": 0.002,
+          "text": ""
+        },
+        {
+          "t": 0.002,
+          "text": "[gic ] Initialising GICv2 IRQ steering..."
+        },
+        {
+          "t": 0.002,
+          "text": "[gic ] GICD_PIDR2 = 0x0000002b  ArchRev = 2  (GICv2 ✓)"
+        },
+        {
+          "t": 0.002,
+          "text": "[gic ] GICD_TYPER = 0x00000068  ITLinesNumber=8  SPIs=256"
+        },
+        {
+          "t": 0.003,
+          "text": "[gic ] GICD init done — 256 SPIs routed to CPU 0 (target=0x01)"
+        },
+        {
+          "t": 0.003,
+          "text": "[gic ] GICC (CPU 0 / Management) — CTLR=0x00000003  PMR=0xff  (all priorities accepted)"
+        },
+        {
+          "t": 0.003,
+          "text": "[gic ] IRQ steering active — HFT cores will be shielded on wakeup."
+        },
+        {
+          "t": 0.003,
+          "text": "[time] CPU 0: CNTFRQ=62500000 Hz  CNTVOFF=0x0  CNTV_CTL=0x0  PMCR=0x41013041  MDCR_EL2=0x86 (HPME=1 TPM=0 TPMCR=0 HPMN=6)"
+        },
+        {
+          "t": 0.004,
+          "text": "[time] CPU 0: PMCCNTR t0=0 t1=0  Δ=0 cycles  (counter advancing: NO (expected on QEMU — cycle counter not emulated))"
+        },
+        {
+          "t": 0.004,
+          "text": "[freq] DVFS lock: QEMU no-op, assuming 1.0 GHz"
+        }
+      ],
+      "next": "wake CPUs 1-3 and seal them off from every interrupt"
+    },
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[boot] CPU 1 power-on requested (PSCI ret=0)."
+        },
+        {
+          "t": 0.0,
+          "text": "[topo] MPIDR_EL1 = 0x0000000080000001  Aff3=0 Aff2=0 Aff1=0 Aff0=1  MT=0  → HFT       (interrupt-free, trading engine)"
+        },
+        {
+          "t": 0.001,
+          "text": "[topo] MPIDR_EL1 = 0x0000000080000002  Aff3=0 Aff2=0 Aff1=0 Aff0=2  MT=0  → HFT       (interrupt-free, trading engine)"
+        },
+        {
+          "t": 0.001,
+          "text": "[boot] CPU 2 power-on requested (PSCI ret=0)."
+        },
+        {
+          "t": 0.001,
+          "text": "[boot] CPU 3 power-on requested (PSCI ret=0)."
+        },
+        {
+          "t": 0.001,
+          "text": "[topo] MPIDR_EL1 = 0x0000000080000003  Aff3=0 Aff2=0 Aff1=0 Aff0=3  MT=0  → HFT       (interrupt-free, trading engine)"
+        },
+        {
+          "t": 0.001,
+          "text": "[boot] Waiting for 3 HFT cores..."
+        },
+        {
+          "t": 0.001,
+          "text": "[boot] All HFT cores ready."
+        },
+        {
+          "t": 0.001,
+          "text": "[boot] SEV sent — HFT cores released to trading loop."
+        },
+        {
+          "t": 0.002,
+          "text": "[time] CPU 3: CNTFRQ=62500000 Hz  CNTVOFF=0x0  CNTV_CTL=0x2  PMCR=0x41013041  MDCR_EL2=0x86 (HPME=1 TPM=0 TPMCR=0 HPMN=6)"
+        },
+        {
+          "t": 0.002,
+          "text": "[time] CPU 2: CNTFRQ=62500000 Hz  CNTVOFF=0x0  CNTV_CTL=0x2  PMCR=0x41013041  MDCR_EL2=0x86 (HPME=1 TPM=0 TPMCR=0 HPMN=6)"
+        },
+        {
+          "t": 0.002,
+          "text": "[time] CPU 1: CNTFRQ=62500000 Hz  CNTVOFF=0x0  CNTV_CTL=0x2  PMCR=0x41013041  MDCR_EL2=0x86 (HPME=1 TPM=0 TPMCR=0 HPMN=6)"
+        },
+        {
+          "t": 0.003,
+          "text": "[time] CPU 3: PMCCNTR t0=0 t1=0  Δ=0 cycles  (counter advancing: NO (expected on QEMU — cycle counter not emulated))"
+        },
+        {
+          "t": 0.003,
+          "text": "[time] CPU 2: PMCCNTR t0=0 t1=0  Δ=0 cycles  (counter advancing: NO (expected on QEMU — cycle counter not emulated))"
+        },
+        {
+          "t": 0.003,
+          "text": "[time] CPU 1: PMCCNTR t0=0 t1=0  Δ=0 cycles  (counter advancing: NO (expected on QEMU — cycle counter not emulated))"
+        },
+        {
+          "t": 0.003,
+          "text": "[hft ] CPU 3 entering trading loop (busy-poll placeholder)."
+        },
+        {
+          "t": 0.003,
+          "text": "[hft ] CPU 2 entering trading loop (busy-poll placeholder)."
+        },
+        {
+          "t": 0.004,
+          "text": "[hft ] CPU 1 entering trading loop (busy-poll placeholder)."
+        }
+      ],
+      "next": "split the L2 cache between the two VMs by page color"
+    },
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[cache] Cortex-A72 L2: 1024KB, 16-way, 64B line → 16 colors"
+        },
+        {
+          "t": 0.0,
+          "text": "[cache] HFT colors : 0..8 (Color 0–7 → L2 lower half, ~512KB)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cache] Mgmt colors: 8..16 (Color 8–15 → L2 upper half, ~512KB)"
+        },
+        {
+          "t": 0.0,
+          "text": "[cache] NOTE: Cortex-A72 L2 index formula undocumented by ARM. Simple PA[15:6] model empirically confirmed by Xen on real A72 hardware. Verify set separation via L2D_CACHE_REFILL on RPi4 (Phase 8, Step P4)."
+        },
+        {
+          "t": 1.898,
+          "text": "[cache] HFT pool: 32768 pages (128 MiB) pre-allocated, colors 0–7 ✓"
+        },
+        {
+          "t": 1.898,
+          "text": "[cache] PoC: allocating 4 HFT-color pages:"
+        },
+        {
+          "t": 1.898,
+          "text": "[cache]   page[0]: PA=0x50685000  color=5  ✓"
+        },
+        {
+          "t": 1.898,
+          "text": "[cache]   page[1]: PA=0x50686000  color=6  ✓"
+        },
+        {
+          "t": 1.898,
+          "text": "[cache]   page[2]: PA=0x50687000  color=7  ✓"
+        },
+        {
+          "t": 1.899,
+          "text": "[cache]   page[3]: PA=0x50690000  color=0  ✓"
+        },
+        {
+          "t": 1.9,
+          "text": "[cache] PoC: all pages freed back to PMM."
+        }
+      ],
+      "next": "build both VMs: shared pages, Stage-2 tables, guest RAM, payload"
+    },
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[vm  ] ManagementVM  id=0 vcpus=1 cores=[0] ipa=[0x40000000, 0x44000000)  (64 MiB)"
+        },
+        {
+          "t": 0.0,
+          "text": "[vm  ] HftEngineVM   id=1 vcpus=3 cores=[1,2,3] ipa=[0x40000000, 0x48000000)  (128 MiB)"
+        },
+        {
+          "t": 0.0,
+          "text": "[vm  ] VcpuRegs: size=928 B  align=16 B  fp_offset=400 B  (Context Save/Restore Assembly constants)"
+        },
+        {
+          "t": 0.001,
+          "text": "[vm  ] stage2_root: MGMT=0x00000000  HFT=0x00000000  (assigned by init_stage2)"
+        },
+        {
+          "t": 0.001,
+          "text": "[watchdog] init: PA=0x50685000"
+        },
+        {
+          "t": 0.001,
+          "text": "[killswitch] init: PA=0x50686000"
+        },
+        {
+          "t": 0.001,
+          "text": "[ipc] init: PA=0x50687000"
+        },
+        {
+          "t": 0.001,
+          "text": "[s2  ] VTCR_EL2 = 0x80023560  PS=010 SL0=01 T0SZ=32"
+        },
+        {
+          "t": 0.002,
+          "text": "[s2  ] ManagementVM  stage2_root=0x50688000"
+        },
+        {
+          "t": 0.002,
+          "text": "[s2  ] HftEngineVM   stage2_root=0x5068c000"
+        },
+        {
+          "t": 0.066,
+          "text": "[vm  ] HFT RAM: IPA=0x40000000 first_PA=0x40685000 (128 MiB, 32768 pages, colors 0-7)"
+        },
+        {
+          "t": 0.1,
+          "text": "[vm  ] Mgmt RAM: IPA=0x40000000 first_PA=0x5060f000 (64 MiB, 16384 pages, colors 8-15)"
+        },
+        {
+          "t": 0.1,
+          "text": "[loader] HFT payload loaded: 60 bytes → IPA=0x40000000  vcpu0 pc=0x40000000 sp=0x40100000"
+        },
+        {
+          "t": 0.1,
+          "text": "[vm  ] HFT pool remaining = 0 (expected 0, pool fully drained)"
+        }
+      ],
+      "next": "release CPU 1 into the guest at EL1, then watch it from EL2"
+    },
+    {
+      "lines": [
+        {
+          "t": 0.0,
+          "text": "[wd  ] heartbeat observer running."
+        },
+        {
+          "t": 0.0,
+          "text": "[hft ] CPU 1 entering HFT guest (vcpu 0, PC=0x40000000)"
+        },
+        {
+          "t": 0.5,
+          "text": "[wd  ] heartbeat=104368 (misses=0)"
+        },
+        {
+          "t": 1.0,
+          "text": "[wd  ] heartbeat=210014 (misses=0)"
+        },
+        {
+          "t": 1.5,
+          "text": "[wd  ] heartbeat=313161 (misses=0)"
+        },
+        {
+          "t": 2.0,
+          "text": "[wd  ] heartbeat=417654 (misses=0)"
+        },
+        {
+          "t": 2.5,
+          "text": "[wd  ] heartbeat=520324 (misses=0)"
+        },
+        {
+          "t": 3.0,
+          "text": "[wd  ] heartbeat=617530 (misses=0)"
+        },
+        {
+          "t": 3.324,
+          "text": "[ks  ] kill switch raised by CPU 0 (flag=HALT_REQUESTED)"
+        },
+        {
+          "t": 3.324,
+          "text": "[exit] guest trapped to EL2: HVC #1 (ESR_EL2=0x5a000001, EC=0x16 HVC64, ELR_EL2=0x40000034)"
+        },
+        {
+          "t": 3.324,
+          "text": "[exit] kill switch acknowledged by guest. vCPU 0 parked at EL2."
+        },
+        {
+          "t": 3.5,
+          "text": "[wd  ] heartbeat=685062 (misses=0)"
+        },
+        {
+          "t": 4.0,
+          "text": "[wd  ] heartbeat=685062 (misses=1)"
+        },
+        {
+          "t": 4.5,
+          "text": "[wd  ] heartbeat=685062 (misses=2)"
+        },
+        {
+          "t": 4.5,
+          "text": "[wd  ] guest halted: heartbeat frozen at 685062 after 9 samples. CPU 0 idle."
+        }
+      ],
+      "kill_at": 3.323
+    }
+  ]
+}
